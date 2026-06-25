@@ -111,6 +111,18 @@ We will see how to manage this in the subsequent steps.
 
 Before going further, let's take a look at the code.
 
+- Browser loads `/`, served from `index.html`. Quarkus serves files under
+  `src/main/resources/META-INF/resources` as static web resources. That means `index.html` becomes
+  the app's root page.
+- `index.html` imports the custom UI components and `wc-chatbot`.
+- `demo-chat.js` component opens a WebSocket to `/customer-support-agent`.
+- Quarkus routes that connection to `CustomerSupportAgentWebSocket.java`.
+- On each text message, the WebSocket calls `customerSupportAgent.chat(message)`.
+- `CustomerSupportAgent` is an interface annotated with `@RegisterAiService`. Quarkus LangChain4j
+  generates the implementation.
+- The generated implementation calls OpenAI using the config in `application.properties`.
+- The LLM response comes back through the WebSocket and is rendered by the chat component.
+
 If you open the `pom.xml` file, you will see that the project is a Quarkus application with the [`quarkus-langchain4j-openai`](https://docs.quarkiverse.io/quarkus-langchain4j/dev/openai-chat-model.html){target="_blank"} extension.
 
 ```xml
@@ -134,7 +146,25 @@ It uses a _WebSocket_, this is why you can also see the following dependency in 
 </dependency>
 ```
 
-If you now open the `src/main/java/dev/langchain4j/quarkus/workshop/CustomerSupportAgentWebSocket.java`  file, you can see how the web socket is implemented:
+`quarkus-rest` is used to get the import map REST resource from the backend. The frontend uses bare
+module imports like `import wc-chatbot` and `import components/demo-chat.js`. Browsers need an
+import map to resolve those names to URLs. That is handled by `ImportmapResource.java`. It exposes
+REST endpoints under `/_importmap`. At startup, `init()` creates an Aggregator. The aggregator
+discovers mappings from the Maven-packaged npm dependencies and then adds local mappings.
+The browser requests `/_importmap/dynamic-importmap.js`, which returns JavaScript that injects a
+`<script type="importmap">` tag into the document. It is a small piece of plumbing, but without it,
+the bare module imports in `index.html` would not resolve.
+
+The `quarkus-maven-plugin`  runs Quarkus code generation and build steps. That matters because
+`@RegisterAiService` does not point to a handwritten implementation. Quarkus generates the
+implementation during build/dev mode.
+
+`demo-chat.js` handles the websocket connection and the ChatBot. `ws.onmessage` (line 89) handles 
+the LLM response and the `sent` EventListener on the ChatBot instance (line 163) writes the user
+message to the socket.
+
+If you now open the `CustomerSupportAgentWebSocket.java` file, you can see how the web socket is
+implemented:
 
 ```java title="CustomerSupportAgentWebSocket.java"
 --8<-- "../../section-1/step-01/src/main/java/dev/langchain4j/quarkus/workshop/CustomerSupportAgentWebSocket.java"
@@ -168,5 +198,8 @@ How this is done is abstracted away by Quarkus LangChain4j.
     The session starts when the user connects to the web socket and ends when the user disconnects.
     This annotation indicates that the `CustomerSupportAgent` object is created when the session starts and destroyed when the session ends.
     It influences the _memory_ of our chatbot, as it remembers the conversation that happened so far in this session.
+    Under the covers, LLM APIs are stateless. The model does not remember previous requests by 
+    itself. LangChain4j provides the memory behavior by retaining the conversation history for the 
+    session and resending the relevant prior messages with each new request.
 
 So far, so good! Let's move on to the [next step](./step-02.md).
