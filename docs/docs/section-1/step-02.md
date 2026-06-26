@@ -47,7 +47,7 @@ Describe a sunset over the mountains
 then set the temperature to`1.5` and ask the question again, observing the different styles of the responses. With a too high temperature, the model often starts producing garbage, takes way too long to respond, or fails to produce a valid response at all.
 
 Applications that require deterministic responses should set the temperature to 0.
-Note that it will note guarantee the same response for the same input, but it will make the responses more predictable.
+Note that it will not guarantee the same response for the same input, but it will make the responses more predictable.
 
 Applications that require a bit more creativity (e.g. to generate text for a story) can set the temperature to 0.3 or higher.
 
