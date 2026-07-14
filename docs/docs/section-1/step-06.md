@@ -358,6 +358,95 @@ This injector is a simple example.
 It does not change the behavior of the RAG pattern.
 But it shows you how you can customize the RAG pattern to fit your needs.
 
+## Quarkus Dev Services
+
+When running the application using `./mvnw quarkus:dev`, we see the following in the logs:
+
+```bash
+INFO [tc.pgvector/pgvector:pg17] (docker-java-stream--1807158221) Starting to pull image
+INFO [tc.pgvector/pgvector:pg17] (docker-java-stream--1807158221) Pulling image layers: 0 pending, 0 downloaded, 0 extracted, (0 bytes/0 bytes)
+INFO [tc.pgvector/pgvector:pg17] (docker-java-stream--1807158221) Pulling image layers: 15 pending, 1 downloaded, 0 extracted, (6 MB/? MB)
+INFO [tc.pgvector/pgvector:pg17] (docker-java-stream--1807158221) Pulling image layers: 0 pending, 16 downloaded, 16 extracted, (150 MB/150 MB)
+INFO [tc.pgvector/pgvector:pg17] (docker-java-stream--1807158221) Pull complete. 16 layers, pulled in 14s (downloaded 150 MB at 10 MB/s)
+INFO [io.quarkus.datasource.deployment.devservices.DevServicesDatasourceProcessor] (ForkJoinPool.commonPool-worker-14) Dev Services for default datasource (postgresql) started - container ID is 4a79106b23d7
+```
+
+The pgvector image (vector similarity search for Postgres) is pulled and a container is started.
+The container runs PostgreSQL with the pgvector extension. Apart from specifying
+`quarkus-langchain4j-pgvector` in the POM and configuring the pgvector dimension in
+`application.properties`, the code specifies absolutely nothing about the database. And yet, it all
+just works out of the box. This is a feature of Qurakus Dev Services. Since we haven't configured a
+datasource and we're in Dev mode, Quarkus automatically takes care of the database related stuff:
+
+- Dynamically configures `quarkus.datasource.jdbc.url`, username, password, etc.
+- Using _Testcontainers_, spins up a docker container with the pgvector extension installed.
+- Adds a table for embeddings.
+
+`quarkus-langchain4j-pgvector` contains auto-configuration for an `EmbeddingStore` which gets
+initialized by CDI bean generation during Quarkus build. We simply inject it in our application.
+The extension already has sensible defaults. The only thing it cannot infer is how many dimensions
+each vector has? That depends on the embedding model. Different embedding models produce vectors
+with different sizes. We're using the `bge-small-en-q` model which generates vectors of size 384.
+
+Note that Quarkus Dev Services is disabled in production. We'd have to configure a real datasource.
+The same `EmbeddingStore` bean is still created, but it will connect to the production database
+instead of the Docker container.
+
+To view the embeddings table:
+
+```bash
+~$ docker inspect 4a79106b23d7 | grep POSTGRES
+                "POSTGRES_USER=quarkus",
+                "POSTGRES_PASSWORD=quarkus",
+                "POSTGRES_DB=quarkus",
+~$ docker exec -it 4a79106b23d7 bash
+root@4a79106b23d7:/# psql -U quarkus
+psql (17.10 (Debian 17.10-1.pgdg12+1))
+Type "help" for help.
+
+quarkus=# \l
+                                                   List of databases
+   Name    |  Owner  | Encoding | Locale Provider |  Collate   |   Ctype    | Locale | ICU Rules |  Access privileges
+-----------+---------+----------+-----------------+------------+------------+--------+-----------+---------------------
+ postgres  | quarkus | UTF8     | libc            | en_US.utf8 | en_US.utf8 |        |           |
+ quarkus   | quarkus | UTF8     | libc            | en_US.utf8 | en_US.utf8 |        |           |
+ template0 | quarkus | UTF8     | libc            | en_US.utf8 | en_US.utf8 |        |           | =c/quarkus         +
+           |         |          |                 |            |            |        |           | quarkus=CTc/quarkus
+ template1 | quarkus | UTF8     | libc            | en_US.utf8 | en_US.utf8 |        |           | =c/quarkus         +
+           |         |          |                 |            |            |        |           | quarkus=CTc/quarkus
+(4 rows)
+
+quarkus=# \c quarkus
+You are now connected to database "quarkus" as user "quarkus".
+quarkus=# \dt
+           List of relations
+ Schema |    Name    | Type  |  Owner
+--------+------------+-------+---------
+ public | embeddings | table | quarkus
+(1 row)
+
+quarkus=# \d embeddings
+                  Table "public.embeddings"
+    Column    |    Type     | Collation | Nullable | Default
+--------------+-------------+-----------+----------+---------
+ embedding_id | uuid        |           | not null |
+ embedding    | vector(384) |           |          |
+ text         | text        |           |          |
+ metadata     | json        |           |          |
+Indexes:
+    "embeddings_pkey" PRIMARY KEY, btree (embedding_id)
+
+quarkus=# \dx
+                             List of installed extensions
+  Name   | Version |   Schema   |                     Description
+---------+---------+------------+------------------------------------------------------
+ plpgsql | 1.0     | pg_catalog | PL/pgSQL procedural language
+ vector  | 0.8.5   | public     | vector data type and ivfflat and hnsw access methods
+(2 rows)
+
+quarkus=# SELECT * FROM embeddings LIMIT 1;
+```
+
 ## Conclusion
 
 In this step, we deconstructed the RAG pattern to understand how it works under the hood.
