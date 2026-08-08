@@ -229,6 +229,26 @@ It will:
 The augmentor has other options, like how the prompt is modified, how to use multiple retrievers, etc.
 But let's keep it simple for now.
 
+Note that `RagRetriever` is a CDI bean. Quarkus LangChain4j extension looks for a
+`RetrievalAugmentor` bean when it generates the implementation of `CustomerSupportAgent`. This is
+an oversimplification, but the implementation looks roughly like this:
+
+```java
+class CustomerSupportAgent_Impl implements CustomerSupportAgent {
+
+    @Inject
+    ChatModel chatModel;
+    @Inject
+    RetrievalAugmentor retrievalAugmentor;
+
+    public String chat(String message) {
+        UserMessage userMessage = new UserMessage(message);
+        userMessage = retrievalAugmentor.augment(userMessage);
+        return chatModel.chat(userMessage);
+    }
+}
+```
+
 ## Testing the application
 
 Let's see if everything works as expected.
