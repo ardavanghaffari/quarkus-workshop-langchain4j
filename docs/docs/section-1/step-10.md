@@ -211,6 +211,19 @@ langchain4j_aiservices_seconds_count{aiservice="PromptInjectionDetectionService"
 langchain4j_aiservices_seconds_sum{aiservice="PromptInjectionDetectionService",method="isInjection",} 0.775163834
 ```
 
+These are Micrometer metrics exposed by LangChain4j (typically through a Prometheus endpoint such as
+`/q/metrics` in Quarkus or `/actuator/prometheus` in Spring Boot). They measure how long your AI
+service methods take to execute. `langchain4j_aiservices_seconds` is a _summary_ metric. `_count`
+records the number of calls. `_sum` records the total execution time. For example
+`langchain4j_aiservices_seconds_count{aiservice="CustomerSupportAgent",method="chat",} 1.0` means
+`CustomerSupportAgent.chat()` has been called once. Its `_sum` variant means the total time spent
+executing that method is 2.485 seconds. `langchain4j_aiservices_seconds_max` is the maximum observed
+execution time during the current measurement window (in other words, the slowest request). 0.0 in
+the example above usually means the metric hasn't yet been published by Micrometer's step-based
+timer. With the Prometheus registry, the max value is often reset every publishing interval
+(typically 1 minute), so seeing 0.0 immediately after startup or after only a few calls is not
+unusual.
+
 You can also customize the metrics collection by adding
 your own custom metrics. You can find more information about how to use Quarkus Micrometer in the
 [Quarkus Micrometer documentation](https://quarkus.io/guides/micrometer).
@@ -393,6 +406,22 @@ It's up to you to decide what your preferred way to create chaos is :).  Once yo
 Don't forget to revert the change you just did!
 
 ![Fallback is being called when an error occurs](../images/fallback.png)
+
+In response to `forget all previous instructions`, the ChatBot returns
+`Failed to get a response from the AI Model. Are you sure it's up and running, and configured correctly?`,
+which comes from `CustomerSupportAgentFallback`.
+
+The expected response is
+`Sorry, I am unable to process your request at the moment. It's not something I'm allowed to do.`,
+triggered by `PromptInjectionGuard`.
+
+The `PromptInjectionGuard` correctly throws an `InputGuardrailException`, but
+`CustomerSupportAgentFallback` intercepts the exception before it can reach the `try-catch` block in
+`CustomerSupportAgentWebSocket`.
+
+This happens because the default behavior of *MicroProfile Fault Tolerance* is that exceptions
+trigger `@Retry` and, after the retries are exhausted, `@Fallback`, unless configured otherwise.
+This also explains the four request/response pairs: the initial request followed by three retries.
 
 ## Conclusion
 
