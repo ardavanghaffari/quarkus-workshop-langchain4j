@@ -112,6 +112,26 @@ Check your terminal logs (you may need to scroll up). You should see output like
 Additional notes: Interior cleaning required due to dog hair in back seat.
 ```
 
+Returning a dirty car results in two request/responses to and from the model. Why is that? The
+above output which is logged by the Java code in `CleaningTool`, appears also before the second
+request/response. The reason is that tool calling is a two-step conversation. The interaction
+is as follows:
+
+1. Application requests returning a dirty car.
+2. The model is called with the prompt and tools available to it.
+3. The model reasons that cleaning should take place returning a tool-call request. This accounts
+   for the first request/response.
+4. Langchain4j sees the model wants to call a function and so calls it. That's when the above output
+   is logged.
+5. At this point Langchain4j constructs another request containing the result from the tool-call
+   asking the model what the final answer should be, upon which the model responds with
+   `"finish_reason": "stop"`. This accounts for the second request/response.
+
+This second call isn't strictly necessary in every tool-calling design. LangChain4j has a concept
+called `ReturnBehavior.IMMEDIATE`, which allows a tool's result to be returned directly without
+sending it back to the model. The default behavior is to send the result back to the model, which is
+why we're seeing the second request here.
+
 ### Test 2: Car Is Clean
 
 Now try returning a car that's already clean:
