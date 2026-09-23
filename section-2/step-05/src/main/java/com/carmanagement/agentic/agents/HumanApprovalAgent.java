@@ -31,6 +31,8 @@ public interface HumanApprovalAgent {
                 carNumber, carYear, carMake, carModel);
         Log.info("⏸️  WORKFLOW PAUSED - Waiting for human approval decision via UI");
 
+        // CDI dependency injection. This Agent is not a Bean. We would have injected the
+        // ApprovalService otherwise.
         ApprovalService approvalService = Arc.container().instance(ApprovalService.class).get();
 
         try {
@@ -42,6 +44,17 @@ public interface HumanApprovalAgent {
                     );
 
             // BLOCK HERE until human makes decision (with 5 minute timeout)
+            // Note that this agent's execution waits on this future, meaning a thread is hanging
+            // for 5 minutes until human input. There is also the SuspendedResponse approach:
+            // Avoids blocking a thread while waiting for input. The workflow state waits instead.
+            // Checkpoints the agentic state, throws AgenticSystemSuspendedException and releases
+            // the calling thread. Two things get checkpointed, the AgenticScope and the planner
+            // state. The former contains the state shared by the agents, agent invocations and
+            // their results. The latter records where the workflow was when it got suspended.
+            // The current LangChain4j implementation stores all this in an AgenticScopeStore which
+            // can be backed by a database. The crucial point is that the JVM thread isn't the state
+            // of the workflow anymore. The database/store contains enough information to reconstruct
+            // it. When input arrives, we send `completePendingResponse()` and resume the workflow.
             ApprovalProposal result = approvalFuture.get(5, TimeUnit.MINUTES);
 
             Log.infof("▶️  WORKFLOW RESUMED - Human decision received: %s", result.decision);
