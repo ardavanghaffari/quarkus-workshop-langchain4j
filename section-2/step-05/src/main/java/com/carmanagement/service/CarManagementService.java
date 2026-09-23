@@ -33,6 +33,12 @@ public class CarManagementService {
      * @param carNumber The car number
      * @param feedback Optional feedback
      * @return Uni that completes with the result of the processing
+     *
+     * This method's implementation has been made asynchronous compared to the previous step.
+     * Processing a car return is a blocking operation if human approval is required. Using a Uni
+     * instead of a plain String as was the case in the previous step has the advantage of offloading
+     * the blocking operation to a worker thread pool. The Http/event-loop thread returns immediately
+     * and is available for handling other requests.
      */
     public Uni<String> processCarReturn(Integer carNumber, String feedback) {
 
