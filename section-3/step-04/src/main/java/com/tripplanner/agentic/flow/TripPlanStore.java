@@ -1,132 +1,163 @@
 package com.tripplanner.agentic.flow;
 
+import java.time.Duration;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Objects;
+import java.util.UUID;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.TimeUnit;
 
 import org.eclipse.microprofile.reactive.messaging.Incoming;
 import org.eclipse.microprofile.reactive.messaging.Message;
+import org.jboss.logging.Logger;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.tripplanner.model.BookingConfirmation;
-import com.tripplanner.model.TripPlan;
-import com.tripplanner.model.TripPlanEntity;
+import com.tripplanner.model.PlanningRequest;
+import com.tripplanner.model.TripApproval;
+import com.tripplanner.model.TripError;
+import com.tripplanner.model.TripPlanStatus;
 import com.tripplanner.model.TripRequest;
-import com.tripplanner.model.TripRequestContext;
+import io.serverlessworkflow.impl.lifecycle.WorkflowExecutionListener;
+import io.serverlessworkflow.impl.lifecycle.WorkflowFailedEvent;
 import io.smallrye.reactive.messaging.ce.CloudEventMetadata;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.transaction.Transactional;
+import jakarta.ws.rs.WebApplicationException;
+import jakarta.ws.rs.core.Response;
 
 @ApplicationScoped
-public class TripPlanStore {
-
-    private static final String STATUS_AWAITING_APPROVAL = "awaiting_approval";
-    private static final String STATUS_CONFIRMED = "confirmed";
+public class TripPlanStore implements WorkflowExecutionListener {
+    private static final Logger LOG = Logger.getLogger(TripPlanStore.class);
+    private final Map<String, TripPlanStatus> requests = new HashMap<>();
+    private final Map<String, String> instances = new HashMap<>();
+    private final Map<String, TripApproval> decisions = new HashMap<>();
+    private String latestRequestId;
 
     @Inject
     ObjectMapper objectMapper;
 
-    @Inject
-    TripRequestContext tripRequestContext;
+    public synchronized PlanningRequest register(TripRequest request) {
+        String requestId = UUID.randomUUID().toString();
+        requests.put(requestId, new TripPlanStatus(requestId, null, request, "planning", null, null, null, null));
+        latestRequestId = requestId;
+        return new PlanningRequest(requestId, request);
+    }
+
+    // Bind the request to the actual Flow instance before any model work or result publication.
+    public synchronized TripPlanStatus bind(PlanningRequest input, String instanceId) {
+        TripPlanStatus status = requests.get(input.requestId());
+        if (status == null || !"planning".equals(status.status()) || status.instanceId() != null
+                || !Objects.equals(input.request(), status.request())) {
+            throw new IllegalStateException("Unknown or duplicate planning request");
+        }
+        TripPlanStatus bound = new TripPlanStatus(status.requestId(), instanceId, status.request(),
+                "planning", null, null, null, null);
+        requests.put(input.requestId(), bound);
+        instances.put(instanceId, input.requestId());
+        return bound;
+    }
 
     @Incoming("flow-out-consumer")
-    @Transactional
     public CompletionStage<Void> consume(Message<String> message) {
         CloudEventMetadata<?> event = message.getMetadata(CloudEventMetadata.class).orElse(null);
         if (event == null) return message.ack();
-
-        String instanceId = (String) event.getExtension("flowinstanceid").orElse(null);
-        if (instanceId == null || instanceId.isBlank()) return message.ack();
-
-        String data = message.getPayload();
-        switch (event.getType()) {
-            case "com.tripplanner.trip.approval.requested" -> handleApprovalRequested(data, instanceId);
-            case "com.tripplanner.booking.finalized" -> handleBookingFinalized(data, instanceId);
-            default -> {
-            }
+        String instanceId = event.<String>getExtension("flowinstanceid").orElse(null);
+        String state = switch (event.getType()) {
+            case "com.tripplanner.trip.approval.requested" -> "awaiting_approval";
+            case "com.tripplanner.booking.finalized" -> "confirmed";
+            case "com.tripplanner.trip.rejected" -> "rejected";
+            case "com.tripplanner.trip.failed" -> "failed";
+            default -> null;
+        };
+        if (instanceId == null || state == null) return message.ack();
+        try {
+            accept(instanceId, state, objectMapper.readValue(message.getPayload(), TripPlanStatus.class));
+        } catch (JsonProcessingException e) {
+            LOG.warn("Ignoring malformed trip outcome event");
         }
         return message.ack();
     }
 
-    @Transactional
-    public TripPlanStatus latest() {
-        TripPlanEntity entity = TripPlanEntity.findLatestAwaiting();
-        return entity == null ? null : toStatus(entity);
+    private synchronized void accept(String instanceId, String state, TripPlanStatus result) {
+        if (result == null || !instanceId.equals(result.instanceId()) || !state.equals(result.status())) return;
+        TripPlanStatus previous = byInstanceId(instanceId);
+        if (previous == null || !previous.requestId().equals(result.requestId())
+                || !previous.request().equals(result.request())) return;
+        boolean planning = "planning".equals(previous.status());
+        if (planning && !state.equals("awaiting_approval") && !state.equals("failed")) return;
+        if (!planning && (!"decision_submitted".equals(previous.status()) || state.equals("awaiting_approval"))) return;
+        if (state.equals("awaiting_approval") && result.plan() == null) return;
+        if (state.equals("confirmed") && result.confirmation() == null) return;
+        // Finalization cannot replace or discard the plan the customer reviewed.
+        requests.put(previous.requestId(), new TripPlanStatus(previous.requestId(), instanceId, previous.request(), state,
+                planning ? result.plan() : previous.plan(), result.confirmation(), result.error(), result.message()));
+        if (!planning) decisions.remove(instanceId);
+        notifyAll();
     }
 
-    /**
-     * Blocks until a new plan appears (one whose instanceId differs from {@code previousId}).
-     * Returns null on timeout.
-     */
-    public TripPlanStatus awaitNextPlan(String previousId, long timeoutSeconds) {
-        long deadline = System.currentTimeMillis() + timeoutSeconds * 1000;
-        while (System.currentTimeMillis() < deadline) {
-            TripPlanStatus status = latest();
-            if (status != null && !status.instanceId().equals(previousId)) {
-                return status;
-            }
-            try {
-                Thread.sleep(500);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return null;
-            }
+    public synchronized TripPlanStatus submitDecision(TripApproval approval) {
+        String instanceId = approval.instanceId();
+        TripPlanStatus previous = byInstanceId(instanceId);
+        if (previous == null) throw error(404, "unknown_trip", "The requested trip was not found.");
+        if (!"awaiting_approval".equals(previous.status())) {
+            throw error(409, "decision_not_pending", "This trip is not awaiting a decision.");
         }
-        return null;
+        TripPlanStatus submitted = previous.outcome("decision_submitted", previous.plan(), null);
+        requests.put(previous.requestId(), submitted);
+        decisions.put(instanceId, approval);
+        return submitted;
     }
 
-    @Transactional
-    public TripPlanStatus byInstanceId(String instanceId) {
-        TripPlanEntity entity = TripPlanEntity.findByInstanceId(instanceId);
-        return entity == null ? null : toStatus(entity);
+    public synchronized boolean matchesDecision(String instanceId, TripApproval approval) {
+        TripPlanStatus status = byInstanceId(instanceId);
+        return status != null && "decision_submitted".equals(status.status())
+                && approval != null && approval.equals(decisions.get(instanceId));
     }
 
-    private void handleApprovalRequested(String data, String instanceId) {
-        try {
-            TripPlan plan = objectMapper.readValue(data, TripPlan.class);
-            TripPlanEntity existing = TripPlanEntity.findByInstanceId(instanceId);
-            if (existing == null) {
-                existing = new TripPlanEntity();
-                existing.instanceId = instanceId;
-            }
-            existing.status = STATUS_AWAITING_APPROVAL;
-            existing.planJson = objectMapper.writeValueAsString(plan);
-            existing.confirmationJson = null;
-            // Persist the originating request so the UI title survives a restart
-            TripRequest req = tripRequestContext.get();
-            existing.requestJson = req != null ? objectMapper.writeValueAsString(req) : null;
-            existing.persist();
-        } catch (Exception e) {
-            // skip malformed events
-        }
+    public synchronized void submissionFailed(String requestId, Throwable failure) {
+        TripPlanStatus previous = requests.get(requestId);
+        if (previous == null || !("planning".equals(previous.status()) || "awaiting_approval".equals(previous.status())
+                || "decision_submitted".equals(previous.status()))) return;
+        requests.put(requestId, previous.failed(failure));
+        decisions.remove(previous.instanceId());
+        notifyAll();
     }
 
-    private void handleBookingFinalized(String data, String instanceId) {
-        try {
-            BookingConfirmation confirmation = objectMapper.readValue(data, BookingConfirmation.class);
-            TripPlanEntity entity = TripPlanEntity.findByInstanceId(instanceId);
-            if (entity == null) return;
-            entity.status = STATUS_CONFIRMED;
-            entity.confirmationJson = objectMapper.writeValueAsString(confirmation);
-            entity.persist();
-        } catch (Exception e) {
-            // skip malformed events
+    @Override
+    public synchronized void onWorkflowFailed(WorkflowFailedEvent event) {
+        // Publishing the domain outcome can itself fail. Only a terminal engine failure takes this fallback path.
+        TripPlanStatus previous = byInstanceId(event.workflowContext().instanceData().id());
+        if (previous != null) {
+            submissionFailed(previous.requestId(), event.cause());
         }
     }
 
-    private TripPlanStatus toStatus(TripPlanEntity entity) {
-        try {
-            TripPlan plan = entity.planJson != null
-                    ? objectMapper.readValue(entity.planJson, TripPlan.class) : null;
-            BookingConfirmation confirmation = entity.confirmationJson != null
-                    ? objectMapper.readValue(entity.confirmationJson, BookingConfirmation.class) : null;
-            TripRequest request = entity.requestJson != null
-                    ? objectMapper.readValue(entity.requestJson, TripRequest.class) : null;
-            return new TripPlanStatus(entity.instanceId, entity.status, plan, confirmation, request);
-        } catch (Exception e) {
-            return null;
+    public synchronized TripPlanStatus awaitPlan(String requestId, Duration timeout) throws InterruptedException {
+        long deadline = System.nanoTime() + timeout.toNanos();
+        while (true) {
+            TripPlanStatus status = requests.get(requestId);
+            if (status != null && !"planning".equals(status.status())) return status;
+            long remaining = deadline - System.nanoTime();
+            if (remaining <= 0) return null;
+            TimeUnit.NANOSECONDS.timedWait(this, remaining);
         }
     }
 
-    public record TripPlanStatus(String instanceId, String status, TripPlan plan, BookingConfirmation confirmation, TripRequest request) {
+    public synchronized TripPlanStatus byRequestId(String requestId) {
+        return requests.get(requestId);
+    }
+
+    public synchronized TripPlanStatus byInstanceId(String instanceId) {
+        return requests.get(instances.get(instanceId));
+    }
+
+    public synchronized TripPlanStatus latest() {
+        return requests.get(latestRequestId);
+    }
+
+    private static WebApplicationException error(int status, String code, String message) {
+        return new WebApplicationException(Response.status(status).entity(new TripError(code, message)).build());
     }
 }

@@ -1,10 +1,12 @@
-# Step 07 - MCP Integration
+# Step 07 - A2A Communication
 
-## Connecting to External Services
+## Multi-turn communication with remote A2A agents
 
-The trip planner needs live data — current weather at the destination, road conditions, points of interest along the route. These come from external MCP services. External data must be validated before showing to customers: a weather service reporting "severe storm warning" should trigger a route change suggestion, not just a footnote.
+The MCP tools can return an equipment offer, but a quote is not a reservation. If Miles of Smiles has no suitable child seat at the customer's pickup branch, it could ask a local equipment-rental partner. The partner might offer another model that meets the child's requirements and fits the vehicle, or arrange delivery from a different branch for an extra fee.
 
-In this step, you'll connect your trip planner to an MCP server providing weather and POI tools, and apply guardrails to validate external data before it reaches the customer.
+Agent-to-Agent (A2A) communication allows the planner and the partner's agent to discuss the rental dates, seat requirements, and counter-offers over several turns. If no suitable seat is available, the planner needs to report that instead of accepting an unsuitable substitute. An equipment reservation needs the customer's explicit approval of its price and pickup terms, even if they already approved the trip plan. Changed terms need renewed approval.
+
+A stock lookup returns availability for a specific request. Discussing alternatives requires the agents to carry context from one exchange to the next.
 
 !!! note "Coming soon"
-    This step is under development. Check back for the full hands-on instructions.
+    This step is under development.

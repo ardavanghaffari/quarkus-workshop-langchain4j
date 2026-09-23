@@ -1,346 +1,315 @@
-# Step 03 - Event-Driven Agentic Workflows with Quarkus Flow
+# Step 03 - Voting, Loops, and Adaptive Model Selection
 
-## From REST Calls to Suspendable Workflows
+The guardrails from Step 02 catch obviously unsuitable recommendations, like suggesting a sports car for a family of five. They cannot however tell us whether the accepted vehicle is actually the *best* choice. E.g. is it comfortable enough for a long road trip? Does it fit the budget? Is it fuel-efficient for the planned route?
 
-In the previous steps, we saw how the trip planning flow runs as one synchronous call. The request comes in, the agents run, and the response comes back. This works for immediate answers, but real-world workflows often need to pause for a human decision, wait for an external system, or coordinate multiple asynchronous steps, and each of those wait points should be observable and recoverable rather than hidden inside a blocked thread.
+In this step we'll add three evaluator agents that independently assess the vehicle recommendation, aggregate their scores with a custom **voting pattern**, and feed the result into a **refinement loop** that lets a reviser agent improve the recommendation until it meets a quality threshold. We'll also add an **adaptive model selection** so that the reviser starts with a lightweight model and switches to a more capable one as the recommendation improves.
 
-[Quarkus Flow](https://quarkiverse.github.io/quarkiverse-docs/quarkus-flow/dev/index.html){target="_blank"} is an event-driven workflow engine where each step emits and consumes [CloudEvents](https://cloudevents.io/){target="_blank"}. The workflow suspends without holding a thread, and any service that receives CloudEvents from e.g. a Kafka topic can see what happened and what the workflow is waiting for.
+## Parallel assessment with the Voting pattern
 
-In this step, you will wire the trip planner through a Quarkus Flow workflow. It will generate a plan, emit an approval request, and suspend. Then, when the user approves or rejects, a second event will resume the same workflow instance.
+The voting pattern dispatches multiple agents in parallel, collects their independent assessments, and aggregates the results into a single decision. Unlike a simple parallel fan-out that merges structured outputs, voting applies a **strategy** to the collected responses, such as averaging scores, taking a majority, or applying any custom aggregation logic.
 
----
+In production systems, voting is valuable because it distributes responsibility across agents that each have a narrow, well-defined scope. An agent focused entirely on cost will catch cost problems that a general-purpose evaluator might trade away against other concerns. The aggregation step makes those individual judgements visible, which also makes the system's behaviour auditable, since you can inspect each agent's score independently to understand why the overall result came out the way it did.
 
-## What Is Quarkus Flow?
+```mermaid
+flowchart LR
+    accTitle: Voting pattern — fan-out, assess, aggregate
+    accDescr: The vehicle recommendation is sent to three evaluators in parallel. Each returns a score and suggestions. A voting strategy aggregates the scores into a single evaluation.
+    Vehicle[Vehicle recommendation] --> E1[Comfort evaluator]
+    Vehicle --> E2[Cost evaluator]
+    Vehicle --> E3[Fuel efficiency evaluator]
+    E1 -->|score + suggestions| Agg[Voting strategy]
+    E2 -->|score + suggestions| Agg
+    E3 -->|score + suggestions| Agg
+    Agg --> Result[Aggregated evaluation]
 
-Quarkus Flow lets you model long-running, event-driven workflows directly in Java, using the [CNCF Serverless Workflow specification](https://serverlessworkflow.io/){target="_blank"} under the hood. This specification defines a common way to describe workflow concepts such as tasks, events, branching, waiting states, and transitions, without tying them to one particular runtime. In practice, it gives Quarkus Flow a shared vocabulary for workflows while still letting you write them in normal Java code.
+    classDef evaluator fill:#e3f2fd,stroke:#1565c0,color:#0d3b66
+    classDef strategy fill:#fff3e0,stroke:#b56500,color:#593200
+    class E1,E2,E3 evaluator
+    class Agg strategy
+```
 
-The workflow in this step is triggered by a [CloudEvent](https://cloudevents.io/){target="_blank"}, which is a standard open source specification for event envelopes. This means events sent via systems like Kafka, Knative Eventing, or HTTP webhooks can all use the same format with common fields such as type, source, id, and data. Because of this, different tools and services (for example, a microservice listening on a Kafka topic or a cloud function triggered by a webhook) can exchange events easily, without having to invent new event formats for each integration.
+We'll implement this with a custom `VotingPlanner` that implements the `Planner` interface from LangChain4j. The planner dispatches all evaluator subagents in parallel using `call(subagents)`, then collects their outputs from the workflow scope and passes them to a `VotingStrategy` for aggregation.
 
-The workflow in this step takes a booking event, generates a trip plan, sends that plan out for approval, and then waits for a response. Once an approval or rejection event comes back, the workflow resumes and either finalizes the booking or cancels, depending on the decision. In the code, those stages are expressed with `schedule`, `emitJson`, `listen`, and `switchWhenOrElse`.
+## Iterative refinement with @LoopAgent
+
+A single evaluation pass tells us how good the recommendation is, but it doesn't improve it. We need a loop that runs the evaluators, checks whether the score meets our threshold, and if not, asks a reviser agent to improve the recommendation before evaluating again. A numeric score and an explicit exit condition also make quality verifiable, because you can write a test that asserts the system meets a defined standard rather than relying on manual review of every output.
 
 ```mermaid
 flowchart TD
-    bookingEvent[Booking confirmed event] --> scheduleTask[schedule]
-    scheduleTask --> planTripTask[planTrip]
-    planTripTask --> emitApproval[emitJson approval requested]
-    emitApproval --> waitApproval[listen waitApproval]
-    waitApproval --> decision{switchWhenOrElse}
-    decision -->|approved| finalizeBooking[finalizeBooking]
-    finalizeBooking --> emitConfirmed[emitJson booking finalized]
-    decision -->|rejected| stopWorkflow[End workflow]
+    accTitle: Vehicle review loop — evaluate, revise, check
+    accDescr: The loop runs evaluators in parallel via the voting planner, then the reviser refines the recommendation. The exit condition checks the evaluation score after the full iteration — if it reaches the threshold the loop exits, otherwise another round begins.
+    Start[Vehicle from research phase] --> Eval[VehicleEvaluators — voting]
+    Eval --> Revise[VehicleReviser — improve recommendation]
+    Revise --> Check{Score ≥ 7.5?}
+    Check -->|Yes| Exit[Use refined vehicle]
+    Check -->|No| Eval
+    Exit --> Cost[CostEstimatorAgent]
+
+    classDef loop fill:#e8f5e9,stroke:#2e7d32,color:#16351a
+    classDef check fill:#fff3e0,stroke:#b56500,color:#593200
+    class Eval,Revise loop
+    class Check check
 ```
 
-!!! note "In-memory state"
-    In this step, the workflow state will be kept in memory. This means that if you restart the app while a workflow is waiting for approval, that waiting instance is lost. In Step 04 you will add PostgreSQL persistence so the workflow survives a restart. Step 05 then introduces loop-oriented orchestration and advanced control flow patterns.
+The `@LoopAgent` annotation wraps this cycle with a configurable maximum number of iterations. The `@ExitCondition` checks the aggregated evaluation score at the end of each iteration. If the score reaches 7.5, the loop exits and the refined vehicle moves on to cost estimation.
 
----
+## Adaptive model selection with @ChatModelSupplier
 
-## Prerequisites
+Not every iteration needs the same model. When the output is still rough, a smaller model can make broad improvements just as effectively as a larger one, at a fraction of the cost. Only once the score is already close to the threshold, and the reviser is making fine adjustments, does a more capable model justify the extra expense. This pattern is particularly relevant in systems that run quality loops at scale, where the cost difference between early and late iterations adds up quickly.
 
-=== "Option 1: Continue from Step 02 and build the new features hands-on"
+The `@ChatModelSupplier` annotation on the reviser agent delegates model selection to a `DynamicModelSelector` CDI bean. This bean injects both the base model (`gpt-4o-mini`) and an enhanced model (`gpt-4o`) and chooses between them based on the current evaluation score.
 
-    Stay in the code you've built in the previous step(s) and apply the changes described in this page. You can continue to run Quarkus in Dev Mode.
+| Evaluation score | Model selected | Rationale |
+|---|---|---|
+| ≤ 6.0 | `gpt-4o-mini` (base) | Broad improvements still needed, so a lighter model suffices |
+| > 6.0 | `gpt-4o` (enhanced) | Fine-tuning a near-ready recommendation benefits from more capability |
 
-=== "Option 2: Use the completed Step 03 project and review the changes"
+This pattern is identical to the one used in [Section 2 Step 07](../section-2/step-07.md) for dynamic model selection based on car value.
 
-    This option allows you to walk through the new code changes, but you won't have to make the changes yourself.
+## Prepare the working copy
 
-    ==Open `section-3/step-03` and start dev mode:==
+As always, you have the option to keep working from the previous step, or work directly with the solution:
+
+=== "Option 1: Continue from Step 02"
+
+    Continue in your Step 02 working copy and apply the changes below. Use the completed Step 03 project for comparison if you get stuck.
+
+=== "Option 2: Use the completed Step 03 project"
+
+    The completed project already contains the changes below. You can read through the implementation without editing, then join the exercise at [Inspecting the voting loop](#inspecting-the-voting-loop).
+
+Start dev mode if it is not already running:
+
+=== "Linux / macOS"
+    ```bash
+    cd section-3/step-03
+    ./mvnw quarkus:dev
+    ```
+
+=== "Windows"
+    ```cmd
+    cd section-3\step-03
+    .\mvnw.cmd quarkus:dev
+        ```
+
+## Add the vehicle evaluation model
+
+The evaluator agents need a shared return type to represent their assessment.
+
+==Create `src/main/java/com/tripplanner/model/VehicleEvaluation.java`:==
+
+```java title="VehicleEvaluation.java"
+--8<-- "../../section-3/step-03/src/main/java/com/tripplanner/model/VehicleEvaluation.java"
+```
+
+Each evaluator will return a score between 1 and 10, along with textual suggestions for improvement. The voting strategy will average the scores and concatenate the suggestions.
+
+## Create the evaluator agents
+
+Each evaluator assesses the vehicle recommendation from a different perspective.
+
+==Create `src/main/java/com/tripplanner/agentic/agents/ComfortEvaluator.java`:==
+
+```java title="ComfortEvaluator.java"
+--8<-- "../../section-3/step-03/src/main/java/com/tripplanner/agentic/agents/ComfortEvaluator.java"
+```
+
+==Create `src/main/java/com/tripplanner/agentic/agents/CostEvaluator.java`:==
+
+```java title="CostEvaluator.java"
+--8<-- "../../section-3/step-03/src/main/java/com/tripplanner/agentic/agents/CostEvaluator.java"
+```
+
+==Create `src/main/java/com/tripplanner/agentic/agents/FuelEfficiencyEvaluator.java`:==
+
+```java title="FuelEfficiencyEvaluator.java"
+--8<-- "../../section-3/step-03/src/main/java/com/tripplanner/agentic/agents/FuelEfficiencyEvaluator.java"
+```
+
+- Each evaluator uses `@Agent` with a unique `outputKey` so the voting planner can read their individual results from the workflow scope.
+- The evaluators take the current `vehicle` recommendation from the scope, plus trip context parameters for their specific assessment dimension.
+- All three return `VehicleEvaluation`, the same record type, so the aggregation strategy can process them uniformly.
+
+## Implement the VotingPlanner
+
+The `VotingPlanner` is a custom `Planner` implementation that dispatches evaluators in parallel and aggregates their results.
+
+==Create `src/main/java/com/tripplanner/agentic/voting/VotingStrategy.java`:==
+
+```java title="VotingStrategy.java"
+--8<-- "../../section-3/step-03/src/main/java/com/tripplanner/agentic/voting/VotingStrategy.java"
+```
+
+==Create `src/main/java/com/tripplanner/agentic/voting/VotingPlanner.java`:==
+
+```java title="VotingPlanner.java"
+--8<-- "../../section-3/step-03/src/main/java/com/tripplanner/agentic/voting/VotingPlanner.java"
+```
+
+- `VotingStrategy` is a **functional interface**, so any lambda or method reference that takes a collection of votes and returns an aggregate can serve as the strategy.
+- `init()` saves the subagents list from the `InitPlanningContext` for later use.
+- `firstAction()` dispatches all evaluator subagents in parallel using `call(subagents)`.
+- `nextAction()` reads each evaluator's output from the workflow scope using its `outputKey`, collects them into a list, and passes them to the strategy. The aggregated result is returned via `done(result)`.
+- `topology()` returns `PARALLEL` so the Dev UI renders the evaluators as parallel branches.
+- Neither `VotingPlanner` nor `VotingStrategy` are library classes — they are custom implementations specific to this application. You can adapt the strategy for any aggregation logic: majority vote, weighted average, or consensus.
+
+## Wire evaluators with @PlannerAgent
+
+The `@PlannerAgent` annotation connects the evaluator subagents to our custom planner through a `@PlannerSupplier` method.
+
+==Create `src/main/java/com/tripplanner/agentic/workflow/VehicleEvaluators.java`:==
+
+```java title="VehicleEvaluators.java"
+--8<-- "../../section-3/step-03/src/main/java/com/tripplanner/agentic/workflow/VehicleEvaluators.java"
+```
+
+- `@PlannerAgent` lists the three evaluator interfaces as `subAgents` and sets `outputKey = "evaluation"` so the aggregated score is available to the exit condition and reviser.
+- `@PlannerSupplier` returns a new `VotingPlanner` instance with the aggregation strategy. The `aggregateVotes` method averages the scores and concatenates non-blank suggestions separated by semicolons.
+- The method signature includes the trip context parameters that the individual evaluators need — the framework propagates them through the workflow scope.
+
+## Add the vehicle reviser with @ChatModelSupplier
+
+The reviser agent takes the current recommendation and evaluation feedback and produces an improved recommendation. It uses adaptive model selection to pick the right model for the current quality level.
+
+==Create `src/main/java/com/tripplanner/agentic/agents/DynamicModelSelector.java`:==
+
+```java title="DynamicModelSelector.java"
+--8<-- "../../section-3/step-03/src/main/java/com/tripplanner/agentic/agents/DynamicModelSelector.java"
+```
+
+==Create `src/main/java/com/tripplanner/agentic/agents/VehicleReviser.java`:==
+
+```java title="VehicleReviser.java"
+--8<-- "../../section-3/step-03/src/main/java/com/tripplanner/agentic/agents/VehicleReviser.java"
+```
+
+- `DynamicModelSelector` is a `@Singleton` CDI bean that injects both the default `ChatModel` and a named `@ModelName("enhancedModel")` model. The `select()` method compares the evaluation score against a threshold.
+- The reviser's `@ChatModelSupplier` static method uses `@CdiBean` to inject the `DynamicModelSelector` and receives the current `VehicleEvaluation` from the workflow scope. This is the same pattern used in [Section 2 Step 07](../section-2/step-07.md).
+- The reviser's `outputKey = "vehicle"` overwrites the original vehicle recommendation in the workflow scope. Downstream agents (like the cost estimator) automatically receive the refined version.
+
+## Wrap the review cycle with @LoopAgent
+
+The loop wraps the evaluators and reviser into an iterative cycle with an exit condition.
+
+==Create `src/main/java/com/tripplanner/agentic/workflow/VehicleReviewLoop.java`:==
+
+```java title="VehicleReviewLoop.java"
+--8<-- "../../section-3/step-03/src/main/java/com/tripplanner/agentic/workflow/VehicleReviewLoop.java"
+```
+
+- `@LoopAgent` lists `VehicleEvaluators` and `VehicleReviser` as subagents. Each iteration runs both: first the evaluators vote, then the reviser refines.
+- `maxIterations = 3` prevents runaway loops if the score never reaches the threshold.
+- `@ExitCondition(testExitAtLoopEnd = true)` checks the condition after each complete iteration. The `shouldExit` method receives the `VehicleEvaluation` from the scope and returns `true` when the average score reaches 7.5.
+- The loop's `outputKey = "vehicle"` means it writes the final refined vehicle back to the scope, overwriting the original from the research phase.
+
+## Update the main workflow
+
+==Open `src/main/java/com/tripplanner/agentic/workflow/TripPlannerSystem.java` and add `VehicleReviewLoop.class` to the `subAgents` array, between `ResearchPhase` and `CostEstimatorAgent`:==
+
+```java hl_lines="5" title="TripPlannerSystem.java"
+--8<-- "../../section-3/step-03/src/main/java/com/tripplanner/agentic/workflow/TripPlannerSystem.java"
+```
+
+The sequence now runs: parallel research → voting evaluation loop → cost estimation. The `@Output` method is unchanged because it still assembles the final `TripPlan` from `vehicle`, `itineraryResult`, and `costs`. The loop simply refines which vehicle reaches the cost estimator.
+
+## Configure adaptive model selection
+
+==Update `src/main/resources/application.properties` to add the enhanced model configuration:==
+
+```properties title="application.properties"
+--8<-- "../../section-3/step-03/src/main/resources/application.properties"
+```
+
+- The base model is now `gpt-4o-mini`, which is cost-effective for most agents.
+- The `enhancedModel` is configured as a separate named model using `gpt-4o`. The `@ModelName("enhancedModel")` qualifier in `DynamicModelSelector` resolves to this configuration.
+- Both models share the same `OPENAI_API_KEY`. The enhanced model has its own temperature and timeout settings.
+
+## Inspecting the voting loop
+
+If the application is not already running, start it from the project directory you chose above:
+
+=== "Linux / macOS"
+    ```bash
+    ./mvnw quarkus:dev
+    ```
+
+=== "Windows"
+    ```cmd
+    .\mvnw.cmd quarkus:dev
+    ```
+
+==Open [http://localhost:8080](http://localhost:8080){target="_blank"} and fill in the form:==
+
+- Destination: `Italian Riviera`
+- Start date: a future date
+- Duration: `5` days
+- Travelers: `4`
+- Trip Type: `Family Vacation`
+- Budget: `Moderate (€1,000–€2,500)`
+
+==Click **Generate Trip Plan**, wait for it to finish, and look for the evaluation and model selection messages in the terminal.== You should see lines like:
+
+```text
+Score 6.3 > 6.0 — switching to enhanced model for final refinement
+```
+
+This indicates the `DynamicModelSelector` chose the enhanced model for that iteration's revision. The evaluator scores and the loop iteration count appear in the agentic execution log.
+
+==Open the [Quarkus Dev UI](http://localhost:8080/q/dev-ui){target="_blank"} and select **Topology** on the LangChain4j Agentic card.== The graph shows the full agent structure: the `planTrip` sequence contains the parallel research phase, the `vehicleReviewLoop`, and `estimateCosts`. Inside the loop you can see the `vehicleEvaluators` node, rendered as a parallel fan-out with the three evaluators, and the `vehicleReviser`.
+
+![The Dev UI topology view showing the planTrip sequence with the research phase, vehicleReviewLoop containing three parallel evaluators and a reviser, and estimateCosts](../images/section-3-step-03-devui-topology.png)
+
+==Switch to **Executions** on the same card and expand the latest run.== The execution trace shows timing for each agent. In the example below, the research phase completed in 7.1 seconds (parallel), the vehicle review loop ran one iteration in 3.9 seconds — the three evaluators scored the initial recommendation at 8.5, 7.5, and 8.5 (average 8.17), the reviser refined the vehicle, and the loop exited because 8.17 ≥ 7.5. The cost estimator then priced the refined vehicle in 1.9 seconds.
+
+![The Dev UI execution view showing a completed trip plan](../images/section-3-step-03-devui-executions.png)
+
+==Compare the vehicle recommendation before and after the loop by inspecting the scope values.== The initial recommendation from the research phase should differ from the refined one produced by the reviser.
+
+??? info "Verifying with tests"
+    The supplied tests verify the voting aggregation, pipeline assembly, and end-to-end HTTP contract without calling a live model.
+
+    ==Run the Step 03 test suite:==
 
     === "Linux / macOS"
         ```bash
-        cd section-3/step-03
-        ./mvnw quarkus:dev
+        ./mvnw test -Dquarkus.http.test-port=0
         ```
 
     === "Windows"
         ```cmd
-        cd section-3\step-03
-        mvnw quarkus:dev
+        .\mvnw.cmd test -Dquarkus.http.test-port=0
         ```
 
----
+    **Aggregation test** — `VehicleEvaluationAggregatorTest` verifies the averaging strategy: three scores produce the correct average, blank suggestions are skipped, and an empty vote list returns zero.
 
-## Dependencies
+    **Pipeline test** — `TripPlanContractTest` checks that the workflow's `subAgents` array includes `VehicleReviewLoop` between `ResearchPhase` and `CostEstimatorAgent`. The scripted model returns high evaluation scores so the loop exits after one iteration, and the HTTP endpoint returns the expected JSON contract.
 
-==Open `section-3/step-02/pom.xml` and add the Quarkus Flow BOM inside `<dependencyManagement>`:==
+    **Failure tests** — `TripPlanningFailureTest` and the guardrail tests from Step 02 continue to pass with the added loop. Each scripted model profile includes an `@Alternative` for the `@ModelName("enhancedModel")` model so the `DynamicModelSelector` resolves correctly without a live API key.
 
-```xml
-<dependency>
-    <groupId>io.quarkiverse.flow</groupId>
-    <artifactId>quarkus-flow-bom</artifactId>
-    <version>${quarkus-flow.version}</version>
-    <type>pom</type>
-    <scope>import</scope>
-</dependency>
-```
+## Taking it further
 
-==Add the version property in `<properties>`:==
+As an optional exercise, try adding a **fourth evaluator** that assesses the vehicle's suitability for the planned route terrain (mountain roads, coastal highways, city driving). Use a different `outputKey` and update the `aggregateVotes` method to handle four votes.
 
-```xml
-<quarkus-flow.version>1.0.0</quarkus-flow.version>
-```
+You can also experiment with the exit condition threshold — lowering it to 6.0 makes the loop exit faster, while raising it to 9.0 may consume all three iterations. Add logging inside the `shouldExit` method to observe the score progression across iterations.
 
-==Add these dependencies to `<dependencies>`:==
+For a more advanced experiment, try a **weighted voting strategy** where the comfort evaluator counts double for family trips and the cost evaluator counts double for economy budgets. Pass the trip type into the aggregation to select the weights.
 
-```xml
-<dependency>
-    <groupId>io.quarkiverse.flow</groupId>
-    <artifactId>quarkus-flow</artifactId>
-</dependency>
-<dependency>
-    <groupId>io.quarkiverse.flow</groupId>
-    <artifactId>quarkus-flow-langchain4j</artifactId>
-</dependency>
-<dependency>
-    <groupId>io.quarkus</groupId>
-    <artifactId>quarkus-messaging-kafka</artifactId>
-</dependency>
-```
+## Troubleshooting
 
----
+??? warning "The enhanced model is not configured"
+    ==Check that `application.properties` has the `quarkus.langchain4j.enhancedModel.*` properties and that `OPENAI_API_KEY` is set.== Both the base and enhanced models use the same API key. If the enhanced model configuration is missing, the `@ModelName("enhancedModel")` injection will fail at startup.
 
-## Messaging Configuration
+??? warning "The loop always runs all three iterations"
+    ==Check the evaluator prompts and the exit condition threshold.== If the evaluators consistently return low scores, the reviser may not improve the recommendation enough. Try lowering the threshold in `VehicleReviewLoop.shouldExit()` or adjusting the evaluator prompts to be more generous. Inspect the evaluation scores in the Dev UI execution view.
 
-==Add this configuration to `application.properties`:==
+??? warning "Tests fail with missing enhancedModel bean"
+    ==Check that each test profile's `getEnabledAlternatives()` includes both `ScriptedModel.class` and `ScriptedEnhancedModel.class`.== The `ScriptedEnhancedModel` is an `@Alternative @ModelName("enhancedModel")` bean that delegates to the default scripted model.
 
-```properties
-# Quarkus Flow messaging bridge
-quarkus.flow.messaging.defaults-enabled=true
+??? warning "OPENAI_API_KEY is not set"
+    ==Set `OPENAI_API_KEY` in the shell used to start the application, then restart it.== Both models require the same key.
 
-# Quarkus Flow execution logging
-quarkus.log.category."io.quarkiverse.flow".level=DEBUG
-quarkus.log.category."io.serverlessworkflow".level=DEBUG
+## What's next?
 
-# Kafka channels for Flow events
-mp.messaging.incoming.flow-in.connector=smallrye-kafka
-mp.messaging.incoming.flow-in.topic=flow-in
-mp.messaging.incoming.flow-in.value.deserializer=org.apache.kafka.common.serialization.StringDeserializer
-mp.messaging.incoming.flow-in.key.deserializer=org.apache.kafka.common.serialization.StringDeserializer
+The planning pipeline now evaluates vehicle recommendations through a voting pattern, refines them iteratively, and adapts model selection based on quality. In Step 04, we'll wrap the entire planning pipeline in an event-driven Quarkus Flow workflow with Kafka and CloudEvents so the customer can approve or reject a proposed trip.
 
-mp.messaging.outgoing.flow-out.connector=smallrye-kafka
-mp.messaging.outgoing.flow-out.topic=flow-out
-mp.messaging.outgoing.flow-out.value.serializer=org.apache.kafka.common.serialization.StringSerializer
-mp.messaging.outgoing.flow-out.key.serializer=org.apache.kafka.common.serialization.StringSerializer
-
-mp.messaging.outgoing.flow-in-producer.connector=smallrye-kafka
-mp.messaging.outgoing.flow-in-producer.topic=flow-in
-mp.messaging.outgoing.flow-in-producer.value.serializer=io.quarkus.kafka.client.serialization.ObjectMapperSerializer
-mp.messaging.outgoing.flow-in-producer.key.serializer=org.apache.kafka.common.serialization.StringSerializer
-
-mp.messaging.incoming.flow-out-consumer.connector=smallrye-kafka
-mp.messaging.incoming.flow-out-consumer.topic=flow-out
-mp.messaging.incoming.flow-out-consumer.value.deserializer=org.apache.kafka.common.serialization.StringDeserializer
-mp.messaging.incoming.flow-out-consumer.key.deserializer=org.apache.kafka.common.serialization.StringDeserializer
-mp.messaging.incoming.flow-out-consumer.auto.offset.reset=earliest
-```
-
-Four channels make up the messaging layer:
-
-| Channel | Direction | Purpose |
-|---|---|---|
-| `flow-in` | incoming | Quarkus Flow reads events from this topic to start or resume workflows |
-| `flow-out` | outgoing | Quarkus Flow publishes workflow events (approval requests, booking confirmations) here |
-| `flow-in-producer` | outgoing | The REST endpoint writes to `flow-in` so it can trigger the workflow from application code |
-| `flow-out-consumer` | incoming | The application reads `flow-out` so it can capture the plan and confirmation for the UI |
-
-Once the app is running, you can verify the channel wiring in the Dev UI under **Messaging > Channels**:
-
-![Messaging Channels view in the Dev UI showing the four Kafka channels and their publishers/subscribers](../images/step-03-messaging-channels.png)
-
----
-
-## New Models
-
-The workflow introduces two new records that don't exist in Step 02.
-
-==Create `src/main/java/com/tripplanner/model/TripApproval.java`:==
-
-```java title="TripApproval.java"
---8<-- "../../section-3/step-03/src/main/java/com/tripplanner/model/TripApproval.java"
-```
-
-==Create `src/main/java/com/tripplanner/model/BookingConfirmation.java`:==
-
-```java title="BookingConfirmation.java"
---8<-- "../../section-3/step-03/src/main/java/com/tripplanner/model/BookingConfirmation.java"
-```
-
-`TripApproval` carries the user's decision (approved or rejected) along with the `instanceId` that ties it back to the right workflow instance. `BookingConfirmation` is what the workflow produces at the end of the approve path.
-
----
-
-## Supporting Classes
-
-Before writing the workflow itself, you need the classes that connect it to the REST layer and the UI.
-
-### TripPlannerFlowAdapter
-
-This bean bridges `TripRequest` to the existing `TripPlannerSystem.planTrip(...)` method so the workflow can call it as a function. It also handles post-approval booking finalization.
-
-==Create `src/main/java/com/tripplanner/agentic/flow/TripPlannerFlowAdapter.java`:==
-
-```java title="TripPlannerFlowAdapter.java"
---8<-- "../../section-3/step-03/src/main/java/com/tripplanner/agentic/flow/TripPlannerFlowAdapter.java"
-```
-
-### TripPlanStore
-
-This bean listens on the `flow-out-consumer` channel and captures workflow events so the REST layer can return results to the UI. It stores plan payloads when the workflow emits an approval request, and booking confirmations after the workflow finalizes.
-
-==Create `src/main/java/com/tripplanner/agentic/flow/TripPlanStore.java`:==
-
-```java title="TripPlanStore.java"
---8<-- "../../section-3/step-03/src/main/java/com/tripplanner/agentic/flow/TripPlanStore.java"
-```
-
-### TripApprovalResource
-
-This endpoint turns the UI's approve or reject action into a `com.tripplanner.trip.approval.done` CloudEvent and publishes it to `flow-in`, where the waiting workflow instance picks it up.
-
-==Create `src/main/java/com/tripplanner/resource/TripApprovalResource.java`:==
-
-```java title="TripApprovalResource.java"
---8<-- "../../section-3/step-03/src/main/java/com/tripplanner/resource/TripApprovalResource.java"
-```
-
-### TripPlannerResource (modified)
-
-The existing `TripPlannerResource` changes from calling `TripPlannerSystem` directly to publishing a CloudEvent that starts the workflow. It then waits for `TripPlanStore` to receive the plan and returns it, so from the UI's perspective the POST still behaves synchronously.
-
-==Replace the contents of `src/main/java/com/tripplanner/resource/TripPlannerResource.java`:==
-
-```java title="TripPlannerResource.java" hl_lines="28 30-31 36-40 45-46 49-71 74-88"
---8<-- "../../section-3/step-03/src/main/java/com/tripplanner/resource/TripPlannerResource.java"
-```
-
----
-
-## Implementing `TripPlannerFlow`
-
-With the supporting classes in place, you can now write the workflow itself. This is the central piece of this step.
-
-==Create `src/main/java/com/tripplanner/agentic/flow/TripPlannerFlow.java`:==
-
-```java title="TripPlannerFlow.java"
---8<-- "../../section-3/step-03/src/main/java/com/tripplanner/agentic/flow/TripPlannerFlow.java"
-```
-
-The workflow reads top to bottom as a sequence of tasks:
-
-1. `schedule` registers a trigger: every time a `com.tripplanner.booking.confirmed` event arrives, a new workflow instance starts.
-2. `set(".[0].data")` unwraps the CloudEvent envelope and passes the `TripRequest` payload to the next task.
-3. `function("planTrip", ...)` calls the adapter, which runs the full multi-agent pipeline and returns a `TripPlan`.
-4. `emitJson` publishes the plan as a `com.tripplanner.trip.approval.requested` event on `flow-out`.
-5. `listen("waitApproval", ...)` suspends the workflow. It will resume only when a `com.tripplanner.trip.approval.done` event arrives whose `flowinstanceid` matches this instance.
-6. `switchWhenOrElse` inspects the approval status. If approved, execution continues to `finalizeBooking`. Otherwise the workflow ends immediately.
-7. `function("finalizeBooking", ...)` generates a `BookingConfirmation`, and the final `emitJson` publishes it as `com.tripplanner.booking.finalized`.
-
----
-
-## Running and Inspecting
-
-==Start the app in dev mode if it is not already running.==
-
-Open the app at [http://localhost:8080](http://localhost:8080){target="_blank"}.
-
-Open the Dev UI at [http://localhost:8080/q/dev](http://localhost:8080/q/dev){target="_blank"} and notice the new Quarkus Flow and Kafka cards. 
-
-![Dev UI Extensions page showing the Flow card with 3 registered workflows](../images/step-03-devui-extensions.png)
-
-Click **Workflows** in the Flow card to see the three registered workflows: `trip-planner-flow` (the one you wrote), plus `research-phase` and `trip-planner-system` (generated by the LangChain4j Agentic extension for the agent pipeline).
-
-![Flow Workflows page listing trip-planner-flow, research-phase, and trip-planner-system](../images/step-03-flow-workflows.png)
-
-Click the eye icon next to `trip-planner-flow` to open the visual flow diagram. You can see each stage of the workflow rendered as a graph, matching the code you wrote in `TripPlannerFlow.java`:
-
-![Flow diagram showing set, call function, emit approval.requested, and listen stages](../images/step-03-flow-diagram.png)
-
----
-
-## Try It Out
-
-==Fill in the trip form and click **Generate Trip Plan**.==
-
-Try a Swiss Alps business trip with a conference in Geneva, snowboarding in Verbier, and wine tasting in Valais.
-
-![The trip form filled in for a Swiss Alps business trip](../images/section-3-trip-form.png)
-
-The form submits to the REST endpoint, which triggers the workflow and blocks until the plan is ready. While the agents research the destination, select a vehicle, and estimate costs, the UI shows a wait screen:
-
-![Planning your trip wait screen](../images/section-3-planning.png)
-
-Watch the terminal at the same time. The `TraceLoggerExecutionListener` prints a line for every task transition:
-
-```
-Task 'set-0' started at ...           pos=do/0/set-0
-Task 'set-0' completed at ...
-Task 'planTrip' started at ...        pos=do/1/planTrip
-Task 'planTrip' completed at ...      output={...}
-Task 'emit-2' started at ...          pos=do/2/emit-2
-Flow: Publishing on channel flow-out  event={..."type":"com.tripplanner.trip.approval.requested"...}
-Task 'emit-2' completed at ...
-Task 'waitApproval' started at ...    pos=do/3/waitApproval
-```
-
-Notice how the log stops at `waitApproval`. The workflow is now suspended in memory, waiting for an event. No thread is blocked and no CPU is consumed while it waits.
-
-When the workflow reaches the approval wait state, the generated plan appears with **Approve Trip** and **Reject Trip** buttons:
-
-![Trip plan waiting for approval](../images/section-3-trip-approval.png)
-
-The yellow banner shows that the workflow is suspended at `listen()`, waiting for a decision. The page shows the vehicle recommendation and route overview produced by the agents.
-
-### Approve path
-
-==Click **Approve Trip**.==
-
-The app sends an approval event with the current `flowinstanceid`. Back in the terminal, the workflow resumes from where it paused:
-
-```
-Task 'waitApproval' completed at ...
-Task 'switch-4' started at ...       pos=do/4/switch-4
-Task 'switch-4' completed at ...
-Task 'finalizeBooking' started at ... pos=do/5/finalizeBooking
-Task 'finalizeBooking' completed at ...
-Task 'emit-6' started at ...         pos=do/6/emit-6
-Flow: Publishing on channel flow-out  event={..."type":"com.tripplanner.booking.finalized"...}
-Task 'emit-6' completed at ...
-Workflow name=trip-planner-flow ...    completed
-```
-
-The UI shows a booking reference once the `booking.finalized` event arrives:
-
-![Trip confirmed with a Miles of Smiles booking reference](../images/section-3-booking-confirmed.png)
-
-### Reject path
-
-==Generate another plan and click **Reject Trip**.==
-
-The workflow resumes from the same wait point and ends without booking finalization. The UI shows a cancellation message.
-
-### Check in Dev UI
-
-Open the Kafka topic browser in the Dev UI under **Apache Kafka Client > Topics**. In the `flow-in` topic, you should see the `com.tripplanner.booking.confirmed` CloudEvent that triggered the workflow, with the full `TripRequest` in its data field:
-
-![flow-in Kafka topic showing the booking.confirmed CloudEvent with the trip request data](../images/step-03-kafka-flow-in.png)
-
-In the `flow-out` topic, you should see the `com.tripplanner.trip.approval.requested` event containing the generated plan. Notice the `flowinstanceid` extension that correlates the approval back to the right workflow instance:
-
-![flow-out Kafka topic showing the approval.requested CloudEvent with the trip plan and flowinstanceid](../images/step-03-kafka-flow-out.png)
-
-After approval, `flow-in` will also contain the `com.tripplanner.trip.approval.done` event, and `flow-out` will contain `com.tripplanner.booking.finalized` (approve path only).
-
-In Quarkus Flow instances, you should see each workflow pause at `waitApproval`, then continue after approval or rejection.
-
----
-
-## Summary
-
-You now have a full event-driven path from UI to workflow. The UI starts the workflow by publishing an event, Flow emits a plan and waits, and the UI decision resumes the same workflow instance. Only approval performs the finalization step.
-
-This is the practical HITL pattern for event-driven orchestration in Quarkus Flow.
-
-In **Step 04**, you will add PostgreSQL-backed persistence so the workflow survives a full restart.
-
-[Continue to Step 04 - Persistent State with PostgreSQL](step-04.md)
+[Continue to Step 04 - Event-Driven Workflows with Quarkus Flow](step-04.md)
