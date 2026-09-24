@@ -78,14 +78,16 @@ public class ApprovalService {
         CompletableFuture<ApprovalProposal> future = new CompletableFuture<>();
         pendingApprovals.put(carNumber, future);
 
-        // Create proposal in separate thread with its own transaction
+        // Create proposal in a separate thread with its own transaction.
         // This ensures the transaction commits BEFORE we return the future.
-        // The thread we're currently on will block until a human decides about the proposal and its
-        // transaction won't commit until after that. So creating the proposal entity on this thread
-        // won't be visible to the UI. The UI polls pending proposals every two seconds. That's why
-        // the DOC mentions: The proposal is persisted in a separate transaction to ensure it’s visible to UI queries.
-        // We spawn a new thread with its own transaction boundaries to ensure the new proposal
-        // is actually created and visible to outside requests before we block on the current thread.
+        // The thread we're currently on will block until a human decides about the proposal.
+        // It also doesn't run in a transaction which is desirable since we wouldn't want to keep a
+        // database transaction open while waiting for LLM calls. So creating the proposal entity
+        // on this thread won't be visible to the UI. The UI polls pending proposals every two seconds.
+        // That's why the DOC mentions: The proposal is persisted in a separate transaction to ensure
+        // it's visible to UI queries. We spawn a new thread with its own transaction boundaries to
+        // ensure the new proposal is actually created and visible to outside requests before we
+        // block on the current thread.
         executor.submit(() -> {
             try {
                 createProposalInNewTransaction(carNumber, carMake, carModel, carYear, carValue,
