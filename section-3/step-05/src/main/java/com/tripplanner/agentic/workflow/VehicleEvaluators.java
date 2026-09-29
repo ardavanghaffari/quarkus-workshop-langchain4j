@@ -3,10 +3,10 @@ package com.tripplanner.agentic.workflow;
 import com.tripplanner.agentic.agents.ComfortEvaluator;
 import com.tripplanner.agentic.agents.CostEvaluator;
 import com.tripplanner.agentic.agents.FuelEfficiencyEvaluator;
-import com.tripplanner.agentic.voting.VotingPlanner;
 import com.tripplanner.model.VehicleEvaluation;
 import dev.langchain4j.agentic.declarative.PlannerAgent;
 import dev.langchain4j.agentic.declarative.PlannerSupplier;
+import dev.langchain4j.agentic.patterns.voting.VotingPlanner;
 import dev.langchain4j.agentic.planner.Planner;
 
 import java.util.Collection;
@@ -34,22 +34,22 @@ public interface VehicleEvaluators {
     }
 
     static Object aggregateVotes(Collection<Object> votes) {
+        if (votes == null || votes.size() != 3) {
+            throw new IllegalStateException("Expected all three vehicle evaluations");
+        }
         double totalScore = 0;
         StringBuilder suggestions = new StringBuilder();
-        int count = 0;
         for (Object vote : votes) {
-            if (vote instanceof VehicleEvaluation eval) {
-                totalScore += eval.score();
-                if (eval.suggestions() != null && !eval.suggestions().isBlank()) {
-                    if (!suggestions.isEmpty()) {
-                        suggestions.append("; ");
-                    }
-                    suggestions.append(eval.suggestions());
-                }
-                count++;
+            if (!(vote instanceof VehicleEvaluation eval) || !Double.isFinite(eval.score())
+                    || eval.score() < 1 || eval.score() > 10) {
+                throw new IllegalStateException("Each vehicle evaluator must return a score between 1 and 10");
+            }
+            totalScore += eval.score();
+            if (eval.suggestions() != null && !eval.suggestions().isBlank()) {
+                if (!suggestions.isEmpty()) suggestions.append("; ");
+                suggestions.append(eval.suggestions());
             }
         }
-        double avgScore = count > 0 ? totalScore / count : 0;
-        return new VehicleEvaluation(avgScore, suggestions.toString());
+        return new VehicleEvaluation(totalScore / votes.size(), suggestions.toString());
     }
 }

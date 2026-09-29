@@ -43,7 +43,7 @@ class TripPlannerFlowTest {
     private static final TripRequest REQUEST = new TripRequest(
             "California Coast", "2026-08-15", 5, "family", 4, "$3000", "beach and scenic drives");
     private static final TripPlan PLAN = new TripPlan(
-            new TripPlan.VehicleRecommendation("SUV", "Generic SUV", "Category recommendation only"),
+            new TripPlan.VehicleRecommendation("SUV", "Generic SUV", "Category recommendation only", null),
             "Pacific Coast Highway",
             List.of(new TripPlan.DayItinerary(1, "Arrival", "Explore Santa Monica", "Santa Monica")),
             new TripPlan.CostEstimate("$120", "$80", "$10", "$200", "$100", "$50", "$560"));
@@ -96,10 +96,12 @@ class TripPlannerFlowTest {
 
     @Test
     void planningFailuresReturnSafeHttpResponses() throws Exception {
-        for (boolean guardrail : new boolean[] {true, false}) {
-            RuntimeException failure = guardrail
-                    ? new AgentInvocationException(new IllegalStateException(new OutputGuardrailException("private response")))
-                    : new AgentInvocationException(new IllegalStateException("private provider token"));
+        for (String code : new String[] {"guardrail_violation", "quality_not_met", "planning_failed"}) {
+            RuntimeException failure = new AgentInvocationException(switch (code) {
+                case "guardrail_violation" -> new OutputGuardrailException("private response");
+                case "quality_not_met" -> new com.tripplanner.model.TripQualityException();
+                default -> new IllegalStateException("private provider token");
+            });
             doThrow(failure).when(adapter).planFromRequest(any());
 
             int baseline = connector.sink("flow-out").received().size();
@@ -108,9 +110,9 @@ class TripPlannerFlowTest {
             relayOutput(connector.<String>sink("flow-out").received().get(baseline));
 
             response.get(5, SECONDS).then()
-                    .statusCode(guardrail ? 422 : 500)
+                    .statusCode(code.equals("planning_failed") ? 500 : 422)
                     .body("status", equalTo("failed"))
-                    .body("error", equalTo(guardrail ? "guardrail_violation" : "planning_failed"))
+                    .body("error", equalTo(code))
                     .body("message", not(containsString("private")));
         }
     }

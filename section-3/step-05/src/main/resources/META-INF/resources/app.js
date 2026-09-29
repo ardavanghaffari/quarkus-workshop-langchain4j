@@ -15,6 +15,9 @@ let submitting = false;
 let decisionUncertain = false;
 let restoring = false;
 let notice = "";
+// Steps 00-03 have no workflow: /trip/plan/latest does not exist and /trip/plan returns the plan itself.
+let workflowApi = true;
+const PLAN_ERROR_FALLBACK = "Could not generate the trip plan. Please try again later.";
 
 // The timeout covers both response headers and the response body.
 async function fetchJson(url, options = {}, timeout = FETCH_TIMEOUT) {
@@ -44,12 +47,17 @@ async function fetchJson(url, options = {}, timeout = FETCH_TIMEOUT) {
 function safeMessage(data, fallback, httpStatus) {
     const expected = {
         invalid_request: 400, invalid_decision: 400, unknown_trip: 404,
-        decision_not_pending: 409, guardrail_violation: 422,
+        decision_not_pending: 409, guardrail_violation: 422, quality_not_met: 422,
+        intelligence_unavailable: 502,
         planning_failed: 500, finalization_failed: 500, wait_interrupted: 503, planning_timeout: 504
     }[data?.error];
     const matches = expected && (httpStatus === undefined || httpStatus === expected
-        || (httpStatus === 200 && isEnvelope(data) && data.status === "failed" && [422, 500].includes(expected)));
+        || (httpStatus === 200 && isEnvelope(data) && data.status === "failed" && [422, 500, 502].includes(expected)));
     return matches && typeof data?.message === "string" && data.message.trim() ? data.message.trim() : fallback;
+}
+
+function isPlan(data) {
+    return data && typeof data === "object" && !("status" in data) && ("vehicle" in data || "itinerary" in data);
 }
 
 function isEnvelope(data) {
@@ -76,6 +84,10 @@ async function restoreLatestPlan() {
     try {
         const { response, data } = await fetchJson("/trip/plan/latest");
         if (token !== generation || response.status === 204) return;
+        if (response.status === 404) {
+            workflowApi = false;
+            return;
+        }
         if (!response.ok || !isEnvelope(data)) throw new Error("restore");
         currentTrip = data;
         restoreForm();
@@ -160,6 +172,20 @@ async function planTrip() {
             body: JSON.stringify(request)
         }, PLANNING_TIMEOUT);
         if (token !== generation) return;
+        if (response.status === 400) {
+            // Request was rejected before the workflow started — show the error on the form.
+            goBackToForm();
+            document.getElementById("formError").textContent =
+                safeMessage(data, "The trip request was invalid. Please check your inputs and try again.");
+            return;
+        }
+        if (isEnvelope(data)) workflowApi = true;
+        if (!workflowApi) {
+            if (response.ok && isPlan(data)) currentTrip = { request, status: "planned", plan: data };
+            else notice = "Error: " + safeMessage(data, PLAN_ERROR_FALLBACK, response.status);
+            renderTrip();
+            return;
+        }
         if (isEnvelope(data)) currentTrip = data;
         if (!response.ok || !isEnvelope(data)) {
             notice = safeMessage(data, "Could not generate the trip plan. Refresh to check its status before retrying.");
@@ -168,6 +194,11 @@ async function planTrip() {
         if (isEnvelope(data) && isPending()) startPolling();
     } catch (error) {
         if (token !== generation) return;
+        if (!workflowApi) {
+            notice = "Error: " + PLAN_ERROR_FALLBACK;
+            renderTrip();
+            return;
+        }
         notice = "Could not finish waiting for the planning response. The workflow may still complete. Refresh to check the latest trip before retrying.";
         renderTrip();
     }
@@ -177,6 +208,7 @@ function renderTrip() {
     const { instanceId, requestId, status, plan, confirmation } = currentTrip;
     const messages = {
         planning: "Planning your trip. Waiting for the backend planning result.",
+        planned: "",
         awaiting_approval: "The workflow is waiting for your decision.",
         decision_submitted: "Decision submitted. Waiting for the workflow to finish processing it.",
         confirmed: `Simulated booking confirmed. Booking reference: ${confirmation?.bookingReference || "N/A"}. No vehicle has been reserved.`,
@@ -189,9 +221,9 @@ function renderTrip() {
         <div class="top-bar">
             <button class="btn-back" onclick="goBackToForm()">&#8592; Plan Another Trip</button>
         </div>
-        <div class="workflow-id" id="workflowId"></div>
+        <div class="workflow-id" id="workflowId" ${workflowApi ? "" : "hidden"}></div>
         <div class="request-id" id="requestId"></div>
-        <div class="status-banner ${bannerClass}" id="tripStatus" role="status"></div>
+        <div class="status-banner ${bannerClass}" id="tripStatus" role="status" ${status === "planned" || (notice && !workflowApi) ? "hidden" : ""}></div>
         <div class="status-banner status-cancelled" id="planError" role="alert" hidden></div>
         <div class="action-bar">
             ${status === "awaiting_approval" ? `
@@ -205,7 +237,7 @@ function renderTrip() {
     document.getElementById("tripStatus").textContent = submitting ? "Submitting your decision..."
         : decisionUncertain && status === "awaiting_approval" ? "Decision status not yet verified. Check its status before submitting again."
         : notice && !requestId ? "Planning outcome not available." : messages[status];
-    if (notice) {
+    if (notice && status !== "failed") {
         document.getElementById("planError").hidden = false;
         document.getElementById("planError").textContent = notice;
     }
@@ -227,6 +259,7 @@ function renderPlan(plan) {
             <h3>&#x1F697; Vehicle Recommendation</h3>
             <div class="card">
                 <strong>${escapeHtml(v.type)} &mdash; ${escapeHtml(v.model)}</strong>
+                ${v.guardrailOverride ? `<div class="guardrail-notice">&#x26A0;&#xFE0F; Guardrail override: ${escapeHtml(v.guardrailOverride)}</div>` : ""}
                 <p>${escapeHtml(v.reasoning)}</p>
             </div>
         </div>
