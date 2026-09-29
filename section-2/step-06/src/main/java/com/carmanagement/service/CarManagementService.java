@@ -91,6 +91,12 @@ public class CarManagementService {
     
     /**
      * Find car info in a read-only transaction
+     * findCarInfo() and updateCarInfo() deliberately have separate transactions because they are
+     * called at different points in the workflow, and the CarInfo entity does not remain managed
+     * between those calls. When findCarInfo() returns, the transaction ends and the CarInfor entity
+     * is no longer attached to an active Hibernate persistence context. So the CarInfo returned by
+     * findCarInfo() is a detached entity by the time updateCarInfo() receives it. This is a
+     * deliberate design as we don't want to keep a DB transaction open while waiting for LLM calls.
      */
     @Transactional(Transactional.TxType.REQUIRES_NEW)
     CarInfo findCarInfo(Integer carNumber) {
@@ -100,6 +106,8 @@ public class CarManagementService {
     /**
      * Update car info in a separate transaction after workflow completes.
      * Uses merge to handle detached entity from the workflow.
+     * Needs its own transaction because it needs a new persistence context in which the detached
+     * entity can be merged. The second transaction is therefore independent of the first one.
      */
     @Transactional(Transactional.TxType.REQUIRES_NEW)
     void updateCarInfo(CarInfo carInfo) {
