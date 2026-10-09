@@ -5,7 +5,7 @@ description: Writing style guide for the Quarkus LangChain4j workshop documentat
 
 # Workshop Documentation Style Guide
 
-This guide captures the conventions established for the Quarkus LangChain4j workshop docs. The reference voice is Section 1, which was written by the project owner without AI assistance.
+This guide captures the conventions established for the Quarkus LangChain4j workshop docs. It is self-contained for contributors to this repository; repeat a general writing rule here when workshop authors need it. The reference voice is Section 1, which was written by the project owner without AI assistance.
 
 ## Voice and Tone
 
@@ -30,6 +30,11 @@ Avoid joining explanatory clauses with a semicolon. Express the relationship nat
 - Prefer: `Even with the skills we added in Step 01, the agents can still overlook our instructions when generating a response. The application therefore needs checks of its own before passing recommendations to the rest of the planning pipeline.`
 
 Read the prose aloud before finishing. If it sounds like a list with the bullets removed, reconnect the ideas rather than just adding transition words. Short action directives are fine, while explanatory paragraphs should have a more conversational rhythm.
+
+When connecting lessons, explain why the previous capability leaves a problem for this chapter to solve. Repeating that the agents now have data does not explain why they might misuse it.
+
+- Avoid: `In Step 06, we gave the planner weather forecasts through MCP. The agents now have that information available, but they can still overlook something the customer asked for.`
+- Prefer: `In Step 06, we connected the planner to weather tools through MCP so it could use their forecasts when recommending a trip. Even with those details, the model still has to choose activities that fit the customer's request.`
 
 ## AI Style Tells to Avoid
 
@@ -143,7 +148,19 @@ When walking through several distinct annotations or methods in a class — for 
 
 When using the list, tie each short bullet to a relevant method, annotation, or assertion. Focus on behavior the reader could miss. Do not list every field and method just to fill the pattern, and do not repeat what the preceding prose already said.
 
-For example, the audit logger needs only: "Calling `log()` writes the guardrail's name, decision, and reason to the terminal. It also keeps the latest 100 entries in memory for tests to inspect through `getRecentEntries()`, until the application restarts."
+For example, a guardrail whose `validate()` runs independent checks in order reads better as a lead sentence and one bullet per check, followed by a short paragraph for the shared consequence:
+
+```
+`validate()` runs three checks in order and returns as soon as one fails:
+
+- The response must parse as JSON. `extractJson()` strips any Markdown fences the model wraps around it.
+- The `itinerary` array must contain at least one day.
+- The route overview and day descriptions must not contain any phrase from `DANGEROUS_KEYWORDS`.
+
+A failed check returns `retry()`, which asks the model for a new response.
+```
+
+By contrast, adding `@OutputGuardrails` to two agents needs one paragraph, not a list.
 
 Add a compact input or output example when it clarifies the behavior, and label illustrative output clearly. Preserve limitations that affect the exercise beside the relevant code. Avoid repeating the explanation in a closing summary or adding a transition that merely announces the next heading.
 
@@ -157,15 +174,26 @@ Split long classes into focused excerpts at useful editing boundaries, keeping e
 
 Prefer the repository's source includes (`--8<--`) so snippets match the completed step. For excerpts, use the supported `path:start:end` syntax and check that `hl_lines` counts from the beginning of the excerpt, not the original file. Recheck ranges and highlights whenever the source changes, and make it clear when an excerpt shows only a method declaration whose body should stay unchanged.
 
+When a chapter adds several settings to the same properties file, give the reader one clear edit at the point where the settings are needed. If later text refers to a setting already shown, explain its purpose there without instructing the reader to add it again. Check that each properties snippet renders the intended lines in MkDocs.
+
 ## Section Structure
 
 ### Opening the chapter
 
 Every chapter should open as a continuation of the previous step, including the first chapter of a new section. Connect what the reader just built or learned to the next concrete problem in the customer journey, then explain what this chapter will change and what the reader will learn through making that change. Preview an observable result they will verify at the end, such as approving the same trip after an application restart.
 
+Make the connection to the previous step once, then explain the new capability on its own terms. Repeated "in Step 04" comparisons make readers reconstruct the earlier lesson instead of understanding the current one. When revising a later section at the author's request, preserve the opening unless the request includes it or a specific inconsistency requires a change.
+
 At the start of a new section or application scenario, make that connection before introducing the new application. Explain how the previous step's outcome or patterns lead into the next customer need, without inventing a code dependency between separate applications. A prerequisite reminder alone is not that connection. Then introduce what the customer needs and what the application returns. An early screenshot gives readers a concrete view of what they will run. Explain what the starter already does, what it lacks, and what this chapter adds before discussing its internal orchestration.
 
 Give these ideas a clear progression in flowing paragraphs rather than separate "What / Why / Learning objectives" inventories. Headings such as "A new scenario" and "What are we building?" are useful when they answer distinct reader questions. Introduce product names when useful, but leave class names and configuration properties for the implementation. A defining mechanism, such as `activate_skill`, can appear earlier if it makes the new concept concrete; do not turn the opening into an API inventory.
+
+When a chapter introduces an unfamiliar practice such as evaluation, explain what the practice is and why the reader needs it before using the trip scenario to illustrate it. Then introduce the service or extension that supports the practice. Do not begin with the sample file, a check written in Java, or a workflow class and expect the reader to infer the larger purpose.
+
+- Avoid: `The itinerary must have three days, which Java can check exactly.` as the first explanation of evaluation.
+- Prefer: `Evaluation checks a generated plan against a saved request and its requirements, so we can compare results after changing the planner.` Then show how the three-day Rome request makes that idea concrete.
+
+When introducing two mechanisms that look similar, explain who decides when each runs and what result it changes. For `@McpToolBox` and `@McpClientAgent`, explain model-selected tool use versus a workflow-invoked agent before naming the workshop class that uses either mechanism. For a runtime judge and a Langfuse evaluation judge, explain that one can request a retry during planning while the other scores a finished plan.
 
 ### Choosing a starting point
 
@@ -193,6 +221,22 @@ Use imperative verb forms for headings that describe an action the reader takes:
 
 Prefer headings that describe what the work accomplishes, such as "Saving workflow progress" or "Showing the restored trip", over a series of generic "Dependencies", "Configuration", and "Implementation" sections. Keep setup details near the work they enable, and avoid repeating the same overview in requirements, objectives, and architecture sections.
 
+The table of contents should identify the concepts this chapter teaches and the tasks that apply them. Put contextual comparisons with earlier steps in prose or an `!!! note`, and place instructions for copying supplied code under the concept that code demonstrates. Keep useful navigation such as "Prepare the working copy".
+
+Group the opening by questions a participant would ask, such as what evaluation is for, when a judge is useful, and what a scripted test proves. Do not turn every supporting noun into its own heading. Samples, datasets, rubrics, scores, and traces can be explained within broader sections that show how the reader will use them.
+
+- Avoid: a sequence of short opening sections titled "Samples", "Datasets", "Rubrics", "Experiments", and "Traces" before the reader knows why the evaluation exists.
+- Prefer: "Evaluating with Langfuse", "Judge models", "Testing with scripted responses", and "Understanding scores and traces", with supporting terms introduced where they help explain each activity.
+
+- Avoid: "How evaluation differs from the guardrails in Step 02" as a main heading.
+- Prefer: "Evaluating with Langfuse", with the guardrail comparison in the judge-model explanation.
+- Avoid: "Add the supplied evaluation tests" followed by a subsection called "The invariant checks".
+- Prefer: "Checking plan structure", with the copying instructions and check explanations in the same section.
+- Avoid: "What the new POM brings in".
+- Prefer: "Add the evaluation and tracing dependencies", or explain the dependencies beside the POM-copy instruction. State what each dependency does, such as loading samples or recording planning runs.
+
+After renaming headings, check their hierarchy and update links to their anchors. Merge subsections that repeat the parent topic. Give a substantial concept its own heading when it answers a different reader question; explain smaller supporting terms in the relevant section.
+
 Use Section 1 for explanation pacing and the concrete business scenarios in Section 2 for motivation. Do not copy earlier chapters' identifier-heavy objective lists or generic recap blocks just because they already exist. Use the focused file-change explanations described above. Section 3 step 01 is a reference for introducing a new scenario, offering participation routes, and teaching execution inspection. Step 04 is a reference for focused edits and optional background. Neither is a fixed template for every chapter.
 
 Keep the required path focused on implementing and verifying the chapter's new concept. Remove unrelated UI tours or refinement exercises. Once the core behavior has been checked, a short "Taking it further" section can invite readers to apply the pattern themselves, such as adding another skill or changing access restrictions. Give a concrete experiment and something to inspect without supplying another complete copy-paste solution. Keep optional changes out of the baseline assumed by the next chapter.
@@ -219,6 +263,8 @@ Capture the actual application and check existing screenshots against the curren
 
 After readers try the feature, connect the inspection exercise to a question the visible result cannot answer. A plausible itinerary does not prove a skill was activated. Explain this at the transition into inspection instead of repeating the same caveat after every test case. Keep warnings that affect an edit beside that edit.
 
+For a feature the customer can use, let participants observe it in their application before sending them to a Dev UI or tracing tool to inspect how it works. For a testing lesson, move from known fixtures to controlled workflow responses to a live model run, and say what each check can establish before adding the next one. Keep test infrastructure in the lesson that teaches testing rather than carrying its setup through unrelated chapters.
+
 Teach readers to recognize evidence, not merely to open a log. In the skills example, startup discovery confirms files were found; an outgoing tool definition confirms availability; a response's `tool_calls` entry shows the model requested activation; and the subsequent tool message shows the returned content. Show short, relevant excerpts and identify which request or response contains each one. Do not imply that activation alone proves the model followed every instruction in the skill.
 
 Use short log excerpts only when they help the reader recognize a specific interaction. Explain what a tool call, error, or returned result means without recounting the author's run. Distinguish illustrative excerpts and fixed-response test output from guarantees about live-model behavior. For recoverable errors, explain how to check for a later successful result without promising recovery. Do not turn generated recommendations or timings from local testing into expected outcomes for the reader.
@@ -229,9 +275,9 @@ Read the chapter once as an explanation and once as an exercise. The first pass 
 
 Check each participation route separately, including its prerequisites and the point where it joins the shared exercise. Confirm that verification shows evidence of the behavior being taught, and that skipping optional practice leaves the reader ready for the next chapter.
 
-## "What's Next?" Endings
+## Closing the chapter
 
-End pages with a short paragraph summarising what was learned (1–2 sentences, no bullet recap) and a plain sentence introducing the next step. No exclamation marks.
+End pages with one or two sentences about what the reader can now do and, when there is another lesson, a plain sentence introducing it. No bullet recap or exclamation marks. At the end of a section, omit "What's next?" when there is no next lesson. A short closing paragraph can link to the conclusion without its own heading.
 
 Example:
 ```

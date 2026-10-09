@@ -1,56 +1,75 @@
 # Step 07 - Testing, Evaluation, and Observability
 
-## Checking that the planner is right, not just plausible
+In Step 06, we connected the planner to weather and points-of-interest tools through MCP so it could use their results when recommending a trip. Even with those details, the model still has to choose activities that fit the customer's request. It might, for example, recommend three days of sightseeing in Rome's historical center when the family specifically asked to visit coastal towns. Miles of Smiles needs to catch that mismatch before relying on customer feedback.
 
-The trip planner now fetches real weather and points of interest before any language model runs. But the plan it returns is still only as good as the model's judgment of that data, and a model that produces a convincing itinerary can still miss the point. The plan for a three-day family trip might skip a rest day, the cost line might come out of a miscalculation, and the vehicle recommendation might ignore the budget because nothing in the pipeline checks it.
+We need a way to check whether changes to our prompts, skills, or models improve the results, or at least don't make them worse. Evaluation gives us a repeatable way to make that comparison.
 
-This step adds a repeatable way to answer three questions that the demo UI cannot:
+## Evaluating with Langfuse
 
-- Is a given plan structurally sound? A deterministic check catches a missing vehicle, a gap in the itinerary, or an invalid cost without calling a model.
-- Does the plan match what the trip actually requires? A judge model compares the output against an expected plan, and a semantic similarity score measures how close they are even when the wording differs.
-- Where did the plan come from? The planning run is traced with OpenTelemetry, the trace is exported to Langfuse, and the evaluation score is attached to the exact trace it was measured from.
+Evaluation gives the planner a known trip request and checks the resulting plan against a description of what a satisfactory answer should contain. For a family asking for three days around Rome with coastal towns, we would expect a complete three-day itinerary with activities that fit the family and include a coastal visit. Repeating this request after a prompt or model change lets us compare the plans against the same expectations.
 
-The result is an evaluation harness you can run before every change to a prompt or a model: the same samples, the same checks, a report with a score and per-case details. When the score drops, the report points at which sample failed and why.
-
-## How evaluation differs from the guardrails in Step 03
-
-Step 03 added guardrails that block a request or a response when it violates a hard rule, such as a destination with a known safety issue. Those are enforcement mechanisms that sit in the request path.
-
-Evaluation sits outside the request path. It runs against saved outputs of completed planning runs, it produces a score and a report rather than a decision, and it uses a judge model that is separate from the model that produced the plan. A guardrail stops a bad plan from being returned; evaluation tells you, after the fact, how often the planner produces bad plans and which ones.
+[Langfuse](https://langfuse.com/docs/evaluation/core-concepts){target="_blank"} is a platform for recording AI application runs and evaluating their results. We'll keep our trip requests and expectations in a dataset there, then compare runs as experiments. The [Quarkus Langfuse extension](https://docs.quarkiverse.io/quarkus-langfuse/dev/index.html){target="_blank"} connects our application to Langfuse, sends planning traces, and lets the application set up the dataset and evaluator. This gives us the plan, its score, and the calls that produced it in one place.
 
 ```mermaid
 flowchart LR
-    subgraph runtime["Request path (Step 03)"]
-        req["Plan request"] --> gr["Guardrails<br/><small>block or pass</small>"]
-        gr --> plan["Trip plan"]
-    end
-
-    subgraph eval["Evaluation path (this step)"]
-        saved["Saved plan output"] --> inv["Invariant checks<br/><small>deterministic</small>"]
-        saved --> judge["AI judge<br/><small>separate model</small>"]
-        inv --> rep["Report + score"]
-        judge --> rep
-        plan -.->|"saved once"| saved
-    end
-
-    plan -.->|"trace"| lf["Langfuse<br/><small>score attached</small>"]
+    sample["Same trip request<br/>and expectations"] --> first["First planning run"]
+    sample --> second["Run after a change"]
+    first --> compare["Compare plans<br/>and scores"]
+    second --> compare
 ```
 
-## Choosing a starting point
+## Judge models
+
+Some requirements can be checked directly, such as whether a three-day trip has three itinerary days. Others need judgment. A plan might mention the coast without offering a useful coastal visit. A judge model reads the completed plan and uses a rubric, or scoring instructions, to assess it against the request. It returns a score with an explanation that we can check against the plan.
+
+We'll also add a judge to the vehicle budget guardrail. This judge checks a recommendation while the planner is working and can ask the vehicle agent to try again. The Langfuse judge scores a completed plan during an evaluation run, so its verdict helps us assess the planner without changing that plan.
+
+## Testing with scripted responses
+
+Before asking a judge to assess a live plan, we need to know that our checks work and that the workflow passes the right information between agents. Plans with known good and bad contents let us test the structural checks. Scripted model responses then give the workflow predictable replies while the MCP agents call the Trip Intelligence server. This lets us check whether weather and points of interest reach the itinerary planner without model variation obscuring a wiring problem.
+
+```mermaid
+flowchart LR
+    fixtures["Known plans"] --> structure["Do the checks catch defects?"]
+    scripts["Scripted replies + MCP data"] --> workflow["Does the workflow pass data correctly?"]
+    live["Live model + saved request"] --> quality["Does the plan meet the request?"]
+```
+
+## Understanding scores and traces
+
+A score is a starting point for reviewing a plan. The judge's explanation tells us which requirement it thought the plan missed, and a trace shows the agent calls and MCP tool results from that planning run. If the score is low, we'll compare the explanation with the plan, then use the trace to find where the recommendation came from. After a change, we can compare two experiments to see how their plans and scores differ.
+
+## Prepare the working copy
 
 === "Option 1: Continue from Step 06"
 
-    ==Apply the changes below to your Step 06 working project.== Keep your existing model-provider settings. Adding `quarkus-langfuse` and `quarkus-opentelemetry` to `pom.xml` triggers an automatic restart in dev mode; the first restart after adding those dependencies will take longer than usual because Dev Services pulls and starts Langfuse containers.
+    ==Stop dev mode in your Step 06 working copy, then copy `section-3/step-07/trip-planner/pom.xml` to `trip-planner/pom.xml` in your working copy. Keep any local model-provider dependencies you added earlier.== Use the completed Step 07 project for comparison if you get stuck.
 
-=== "Option 2: Use the completed Step 07 project"
+    ==Remove the Step 06 tests from your working copy's `trip-planner` directory: `src/test/java/com/tripplanner/agentic/`, `src/test/java/com/tripplanner/mcp/`, and `src/test/frontend/`.== These tests remain available in Step 06. The Step 07 test configuration selects the evaluation suite.
 
-    ==Copy `section-3/step-07` to a working directory and open that copy. Apply your model-provider settings.== The code changes below are already included, including `BudgetVerdict.java`, `VehicleBudgetJudge.java`, the updated `TripAppropriatenessGuardrail.java`, and the `judgeModel` configuration. Join the hands-on route at [Adding the evaluation dependencies](#adding-the-evaluation-dependencies).
+    ==Then follow the page from [the vehicle guardrail changes](#check-vehicle-budgets-with-a-judge-model) onwards.== The first dev mode start after the POM change takes longer than usual, because Dev Services pulls and starts the Langfuse containers.
 
-The same prerequisites from Step 06 apply: a model provider key, a container runtime for the Dev Services the planner needs, and the Trip Intelligence MCP server running on port 8085 for the live evaluation runs.
+=== "Option 2: Follow the completed Step 07 project"
 
-## Upgrading the vehicle guardrail to an LLM judge
+    ==Copy `section-3/step-07` to a working directory and open that copy. Apply your model-provider settings.== Every file on this page is already there, so you can follow along and join the hands-on part at [Run the offline tests](#run-the-offline-tests).
 
-The `TripAppropriatenessGuardrail` in Steps 02–06 uses a hardcoded list of brand names to detect luxury vehicles on economy budgets. That list covers obvious supercars but misses premium SUVs and saloons that are equally unaffordable on an economy budget. In this step we replace that heuristic with an LLM-based judge that evaluates the vehicle's type, model name, and reasoning text together, so the decision reflects intent rather than brand-name matching.
+You still need a container runtime for Dev Services, and the live evaluation runs need the Trip Intelligence MCP server from Step 06 running on port 8085. The judge in Langfuse calls OpenAI, so dev mode needs `OPENAI_API_KEY` set for the quality run. If you use another provider, read the note in [Configure the Langfuse evaluator](#configure-the-langfuse-evaluator) first.
+
+The paths below are relative to your working copy's `trip-planner` directory.
+
+The updated POM adds the LangChain4j evaluation module for loading samples and running checks. It also adds OpenTelemetry and the Langfuse extension to record planning runs and send them to Langfuse.
+
+```xml title="pom.xml (evaluation dependencies)"
+--8<-- "../../section-3/step-07/trip-planner/pom.xml:76:104"
+```
+
+Maven runs the fixture-based tests with `./mvnw test`. The `evals` profile selects the live integration tests through Failsafe, so we'll use it when we reach the MCP and model evaluations.
+
+## Check vehicle budgets with a judge model
+
+An economy-budget customer should not receive an expensive vehicle recommendation. The existing brand list catches an obvious luxury brand such as Ferrari, but can miss an expensive model from another manufacturer. We'll add a judge to the guardrail so it can check the vehicle before the workflow continues and ask the vehicle agent to try again when needed. This judge acts during planning. The Langfuse judge we'll configure later scores a completed plan for an evaluation run; its score does not change the customer's plan.
+
+The budget judge returns a verdict and a reason, which we'll represent with a Java record.
 
 ==Create `src/main/java/com/tripplanner/guardrails/BudgetVerdict.java`:==
 
@@ -64,20 +83,22 @@ The `TripAppropriatenessGuardrail` in Steps 02–06 uses a hardcoded list of bra
 --8<-- "../../section-3/step-07/trip-planner/src/main/java/com/tripplanner/guardrails/VehicleBudgetJudge.java"
 ```
 
-`VehicleBudgetJudge` is a `@RegisterAiService` bound to a named model called `judgeModel`, and is annotated `@ApplicationScoped` so it can be injected and called from threads that have no active HTTP request context, such as the Quarkus Flow executor threads that run the guardrail. Without that annotation, the default `@RequestScoped` CDI proxy would throw a `RequestScoped context was not active` error every time the guardrail tried to reach it. Its system prompt explains what the judge must decide and instructs it to be strict: if there is any doubt, the vehicle is not appropriate. The user message gives the judge the budget tier, vehicle type, vehicle model, and the agent's own reasoning, so it can read the full context rather than pattern-matching a single field.
+The judge reads the budget tier together with the vehicle type, model, and the recommending agent's reasoning. Its prompt asks it to reject a recommendation when it is uncertain whether the vehicle fits an economy budget.
 
-==Update `src/main/java/com/tripplanner/guardrails/TripAppropriatenessGuardrail.java` to inject and use the judge:==
+`@RegisterAiService` connects this service to the named `judgeModel`. The service also needs `@ApplicationScoped` because the guardrail runs on Quarkus Flow executor threads, where there is no HTTP request context. The default `@RequestScoped` service would fail there with `RequestScoped context was not active`.
 
-```java title="TripAppropriatenessGuardrail.java"
+==Update the highlighted lines in `src/main/java/com/tripplanner/guardrails/TripAppropriatenessGuardrail.java` to inject and use the judge:==
+
+```java hl_lines="24-26 36-37 81-95" title="TripAppropriatenessGuardrail.java"
 --8<-- "../../section-3/step-07/trip-planner/src/main/java/com/tripplanner/guardrails/TripAppropriatenessGuardrail.java"
 ```
 
-For economy budgets, the guardrail runs a fast pre-check against `OBVIOUS_LUXURY_BRANDS` — Ferrari, Lamborghini, and similar supercars — to skip the judge call for clear-cut cases. For everything else it calls the judge and acts on the verdict. This keeps obvious cases cheap while using the full LLM reasoning for the ambiguous ones, such as a Land Rover Discovery recommended for a five-person economy trip.
+For economy budgets, the guardrail still rejects brands in `OBVIOUS_LUXURY_BRANDS` without calling the judge. Other recommendations go to the judge, whose verdict determines whether the guardrail asks the vehicle agent for an affordable alternative.
 
 ==Add the `judgeModel` configuration to `src/main/resources/application.properties`:==
 
 ```properties title="application.properties (judgeModel)"
-# Judge model for LLM-based guardrail evaluation (fast, cheap)
+# Model used by the vehicle budget judge
 quarkus.langchain4j.judgeModel.chat-model.provider=openai
 quarkus.langchain4j.openai.judgeModel.api-key=${OPENAI_API_KEY}
 quarkus.langchain4j.openai.judgeModel.chat-model.model-name=gpt-4o-mini
@@ -85,320 +106,256 @@ quarkus.langchain4j.openai.judgeModel.chat-model.temperature=0
 quarkus.langchain4j.openai.judgeModel.timeout=30
 ```
 
-`gpt-4o-mini` at temperature 0 is fast and deterministic enough for a binary budget verdict. Using a named model keeps its cost separate from the planner's main model usage, which is visible as a distinct service in Langfuse.
+The budget judge uses its own model configuration, so you can change it independently of the agents that generate the plan.
 
-## Adding the evaluation dependencies
+## Define acceptable plans for sample requests
 
-The evaluation harness uses the `quarkus-langchain4j-testing-evaluation` modules for sample loading, scoring, and the AI judge. We also need OpenTelemetry for tracing and the Langfuse extension for publishing scores to the trace.
+The Rome example gives us a repeatable question: does a plan for a three-day family trip include a coastal town? A sample saves the planner inputs alongside a description of an acceptable result. We can then change the planner and compare each new plan against the same requirements.
 
-==Add the following dependencies to your `trip-planner/pom.xml`:==
-
-```xml title="pom.xml (new evaluation dependencies)"
---8<-- "../../section-3/step-07/trip-planner/pom.xml:72:110"
-```
-
-The snippet shows all evaluation-related dependencies. If you are continuing from Step 06, `quarkus-junit` and `smallrye-reactive-messaging-in-memory` are already present — add only the ones that are new: `quarkus-opentelemetry`, `quarkus-langfuse`, the three `testing-evaluation` modules, and `awaitility`.
-
-## Saving a plan as text
-
-Everything in this step evaluates one thing: the text form of a completed plan. Before we can check whether a plan is valid or compare it against an expected output, we need a stable way to turn a `TripPlan` into a string. The invariant checks, the judge comparison, and the test fixtures all operate on this rendering.
-
-==Create `src/test/java/com/tripplanner/evaluation/TripPlanText.java`:==
-
-```java title="TripPlanText.java"
---8<-- "../../section-3/step-07/trip-planner/src/test/java/com/tripplanner/evaluation/TripPlanText.java"
-```
-
-`render()` serializes a `TripPlan` to pretty-printed JSON, and `read()` parses it back. Rendering is deliberately mechanical, so a plan that is structurally broken in the `TripPlan` shows up as a broken rendering. This is exactly what the checks below look for.
-
-## Writing the invariant strategy
-
-The cheapest way to catch a broken plan is to check its shape with plain Java. The invariant strategy inspects a saved plan for the properties every valid plan must have, and it does not call a model at any point, so it runs in milliseconds and costs nothing.
-
-==Create `src/test/java/com/tripplanner/evaluation/TripPlanInvariantStrategy.java`:==
-
-```java title="TripPlanInvariantStrategy.java"
---8<-- "../../section-3/step-07/trip-planner/src/test/java/com/tripplanner/evaluation/TripPlanInvariantStrategy.java"
-```
-
-The strategy implements `EvaluationStrategy<String>` from the `quarkus-langchain4j-testing-evaluation` module. It takes the sample and the actual output, then returns an `EvaluationResult` with a score from 0 to 1, a pass or fail decision, and a reason. The checks cover the vehicle recommendation fields, the itinerary day count and numbering, and the cost total format.
-
-## Pinning the invariants with known-bad fixtures
-
-The invariants need their own test cases so you can verify they catch real defects. Each fixture is a plan with a specific problem, and the test asserts that the strategy fails it and names the defect in the result.
-
-==Create `src/test/resources/evaluation/known-bad.yaml`:==
-
-```yaml title="known-bad.yaml"
---8<-- "../../section-3/step-07/trip-planner/src/test/resources/evaluation/known-bad.yaml"
-```
-
-The file is JSON inside a YAML list so each entry is a single string the strategy can parse. Five defects are pinned: a null vehicle, a gap in the itinerary days, a negative cost, a non-numeric cost, and an empty output.
-
-==Create `src/test/java/com/tripplanner/evaluation/KnownBadOutputs.java` to load the fixtures:==
-
-```java title="KnownBadOutputs.java"
---8<-- "../../section-3/step-07/trip-planner/src/test/java/com/tripplanner/evaluation/KnownBadOutputs.java"
-```
-
-## Testing the invariant strategy
-
-Now we can write the test that exercises the strategy against both valid plans and the known-bad fixtures.
-
-==Create `src/test/java/com/tripplanner/evaluation/TripPlanInvariantStrategyTest.java`:==
-
-```java title="TripPlanInvariantStrategyTest.java"
---8<-- "../../section-3/step-07/trip-planner/src/test/java/com/tripplanner/evaluation/TripPlanInvariantStrategyTest.java"
-```
-
-The test builds valid plans with `validPlan()`, which constructs a complete `TripPlan` with the right number of days, and checks them against the strategy. It also verifies that currency formats with or without the euro sign pass, that wrong day counts and duplicates fail, that missing fields fail without a crash, and that every entry in `known-bad.yaml` is caught with the correct reason.
-
-==Make sure the Surefire plugin in your `pom.xml` includes this test:==
-
-```xml
-<include>**/TripPlanInvariantStrategyTest.java</include>
-```
-
-==Run the invariant test:==
-
-```shell
-cd section-3/step-07/trip-planner
-./mvnw test -Dtest=TripPlanInvariantStrategyTest
-```
-
-All four test methods should pass. If an invariant is missing or the fixture format is wrong, the test names the failing entry.
-
-## Adding the AI judge
-
-The invariant gate checks structure. It cannot tell you that the plan is for the wrong season, or that the vehicle reasoning contradicts the trip requirements. For that, we need a model to compare the output against the expected output for the same sample.
-
-The judge is a separate model invocation from the planning run. It runs with its own prompt and is never in the planning path, so its usage stays separable from the planner's measurements.
-
-==Create `src/test/resources/evaluation/rubric.txt`:==
-
-```text title="rubric.txt"
---8<-- "../../section-3/step-07/trip-planner/src/test/resources/evaluation/rubric.txt"
-```
-
-The rubric asks the model for the single word `true` or `false`. `AiJudgeStrategy` parses the verdict with `Boolean.parseBoolean`, so a JSON object, a full sentence, or a score with an explanation all read as `false`.
-
-==Create `src/test/java/com/tripplanner/evaluation/TripPlanJudge.java`:==
-
-```java title="TripPlanJudge.java"
---8<-- "../../section-3/step-07/trip-planner/src/test/java/com/tripplanner/evaluation/TripPlanJudge.java"
-```
-
-`TripPlanJudge` wraps `AiJudgeStrategy`, loads the rubric from the classpath, and attaches metadata recording which model class was used for the judgment.
-
-## Verifying the judge contract offline
-
-The judge contract is worth pinning with a deterministic test. A scripted model always returns a fixed string, so we can verify the parsing rules without any network call: a `true` verdict passes, a `false` verdict fails, and a JSON or prose verdict fails.
-
-==Create `src/test/java/com/tripplanner/evaluation/TripPlanJudgeContractTest.java`:==
-
-```java title="TripPlanJudgeContractTest.java"
---8<-- "../../section-3/step-07/trip-planner/src/test/java/com/tripplanner/evaluation/TripPlanJudgeContractTest.java"
-```
-
-The `JudgeModel` inner class implements `ChatModel` and always returns the configured verdict string. The four test methods pin the contract: a matching plan passes, a mismatching plan fails, a JSON verdict is never parsed as a pass, and a prose verdict is treated as false.
-
-==Add the test to Surefire:==
-
-```xml
-<include>**/TripPlanJudgeContractTest.java</include>
-```
-
-==Run both tests so far:==
-
-```shell
-./mvnw test -Dtest=TripPlanInvariantStrategyTest,TripPlanJudgeContractTest
-```
-
-## Recording evaluation runs
-
-A single evaluation run is a snapshot. The useful question is what happens when you run the same sample again with the same inputs and compare the results. We need a way to record each run with its input, saved output, captured evidence, trace id, model name, and per-strategy outcomes.
-
-==Create `src/test/java/com/tripplanner/evaluation/EvaluationRun.java`:==
-
-```java title="EvaluationRun.java"
---8<-- "../../section-3/step-07/trip-planner/src/test/java/com/tripplanner/evaluation/EvaluationRun.java"
-```
-
-`EvaluationRun` is a record that holds everything about one evaluated run. `StrategyOutcome` captures the result of one strategy. `aggregateScore()` returns the mean of the strategy scores, and `allStrategiesPassed()` is a convenience check.
-
-==Create `src/test/java/com/tripplanner/evaluation/EvaluationRunRecorder.java`:==
-
-```java title="EvaluationRunRecorder.java"
---8<-- "../../section-3/step-07/trip-planner/src/test/java/com/tripplanner/evaluation/EvaluationRunRecorder.java"
-```
-
-The recorder is an in-memory store that keeps every run per sample, so a follow-up run is compared against the first rather than replacing it. `SampleHistory` groups the runs for one sample and has an `inputsMatch()` method that detects when a repeated experiment used different parameters.
-
-## Testing the recorder
-
-==Create `src/test/java/com/tripplanner/evaluation/EvaluationRunRecorderTest.java`:==
-
-```java title="EvaluationRunRecorderTest.java"
---8<-- "../../section-3/step-07/trip-planner/src/test/java/com/tripplanner/evaluation/EvaluationRunRecorderTest.java"
-```
-
-The test verifies that a repeated experiment retains comparable inputs and evidence, that per-case results stay separate, that mismatched inputs are detected, and that the aggregate score is the mean of the per-strategy scores.
-
-==Add the test to Surefire:==
-
-```xml
-<include>**/EvaluationRunRecorderTest.java</include>
-```
-
-## Writing evaluation samples
-
-The harness needs a set of known trip requests and their expected outputs. These samples define the inputs that both the offline and live suites use.
-
-==Create `src/test/resources/evaluation/samples.yaml`:==
+==Create `src/main/resources/evaluation/samples.yaml`:==
 
 ```yaml title="samples.yaml"
---8<-- "../../section-3/step-07/trip-planner/src/test/resources/evaluation/samples.yaml"
+--8<-- "../../section-3/step-07/trip-planner/src/main/resources/evaluation/samples.yaml"
 ```
 
-Each sample has a name, the planner parameters (destination, date, days, travel style, travelers, budget, interests), an expected output string, and tags. The expected output uses the same format as `TripPlanText.render()` so the invariant and judge checks agree on what they're comparing.
+In `rome-family-three-days`, the `parameters` are the trip request and `expected-output` describes what a satisfactory plan contains, including family-friendly activities and a coastal town. Several itineraries could meet those requirements, so the sample does not prescribe exact wording or stops.
 
-## Assembling the harness test
+The Java checks use the request parameters to check details such as the number of days. The Langfuse judge compares the generated plan with `expected-output`.
 
-The harness test ties the samples, the invariant strategy, and the scorer together. It loads samples from the YAML file, runs the invariant strategy against a synthetic valid plan for each sample's requested duration, and saves a report.
+The samples belong in the main resources because dev mode reads them at startup and copies them into the `trip-plan-samples` dataset in Langfuse. Edit the YAML file to keep changes in your project, then restart dev mode to update the dataset.
 
-==Create `src/test/java/com/tripplanner/evaluation/TripPlanEvaluationHarnessTest.java`:==
+## Write the evaluation rubric
 
-```java title="TripPlanEvaluationHarnessTest.java"
---8<-- "../../section-3/step-07/trip-planner/src/test/java/com/tripplanner/evaluation/TripPlanEvaluationHarnessTest.java"
+Java can check whether the itinerary has three days, but assessing whether its activities suit a family requires judgment. We'll give the Langfuse evaluator a rubric that tells it how to compare the plan with the sample's requirements.
+
+==Create `src/main/resources/evaluation/rubric.txt`:==
+
+```text title="rubric.txt"
+--8<-- "../../section-3/step-07/trip-planner/src/main/resources/evaluation/rubric.txt"
 ```
 
-The first test loads the samples, generates a valid plan for each one, runs the invariant strategy, and asserts all pass. It also saves the report as JSON and checks that one of the sample names (`rome-family-seven-days`) appears in it. The second test proves that a fixed one-day plan cannot pass samples requesting different durations, confirming the harness actually catches the mismatch.
+For the Rome sample, Langfuse replaces `{{input}}` with the saved trip request, `{{output}}` with the generated plan JSON, and `{{ground_truth}}` with the requirements in `expected-output`. The rubric asks the judge to check each requirement without penalizing different wording, order, or extra detail. The result is a score with an explanation of any missed requirements.
 
-==Add the test to Surefire:==
+## Configure the Langfuse evaluator
 
-```xml
-<include>**/TripPlanEvaluationHarnessTest.java</include>
+Starting dev mode will copy the YAML samples into a Langfuse dataset and register the rubric as an evaluator. When the quality test runs a sample, Langfuse receives the completed plan through its trace, applies the rubric, and records a score. `LangfuseEvaluationSetup` prepares the dataset, model connection, and evaluator through the extension's `LangfuseOperations` client.
+
+==Create `src/main/java/com/tripplanner/evaluation/LangfuseEvaluationSetup.java`:==
+
+```java title="LangfuseEvaluationSetup.java"
+--8<-- "../../section-3/step-07/trip-planner/src/main/java/com/tripplanner/evaluation/LangfuseEvaluationSetup.java"
 ```
 
-## Running the offline suite
+At startup, `onStart()` checks whether evaluation setup is enabled. When it is, the class creates the model connection and the `trip-plan-samples` dataset, then registers the rubric as an evaluator named `plan-quality`. Its evaluation rule selects experiment items from that dataset and supplies the request, generated plan, and expected output to the rubric.
 
-The offline suite runs all four test classes against the fixtures, with no model provider, no container runtime, and no network.
+The evaluator returns a score between 0 and 1, where 1 means the plan meets every requirement, with a sentence explaining any missed requirements. The test will retrieve this score by its `plan-quality` name, so the evaluator and test must use the same name.
 
-==Run the default test suite in `section-3/step-07/trip-planner`:==
+The setup reuses existing objects and updates dataset items by sample name, so restarting it against the same Langfuse instance does not add duplicate samples. If a setup call fails, the application logs a warning and continues starting. The quality test needs both the dataset and evaluator, so we'll check those startup messages before running it.
 
-```shell
-./mvnw test
+==Add the setup flag to `src/main/resources/application.properties` to enable this initialization in dev mode:==
+
+```properties title="application.properties (evaluation setup)"
+--8<-- "../../section-3/step-07/trip-planner/src/main/resources/application.properties:21:23"
 ```
 
-Your Surefire `<includes>` should now list all four tests:
+!!! note "Using a provider other than OpenAI"
+    The judge runs in the Langfuse worker container and calls the model through the LLM connection, so it needs an OpenAI API key even when your planner uses another provider. If your provider has an OpenAI-compatible endpoint, you can point the connection at it instead, either by editing the LLM connection in the Langfuse UI or by setting a base URL in `createLlmConnection()`. For Ollama, the base URL is `http://host.docker.internal:11434/v1`, because `localhost` inside the container is the container itself. If neither works for you, skip the quality run. The offline suite and the composition run work with any provider.
 
-```xml
-<includes>
-    <include>**/TripPlanInvariantStrategyTest.java</include>
-    <include>**/TripPlanJudgeContractTest.java</include>
-    <include>**/TripPlanEvaluationHarnessTest.java</include>
-    <include>**/EvaluationRunRecorderTest.java</include>
-</includes>
+## Check plan structure
+
+Before judging the recommendations, we need to know whether a plan is complete enough to evaluate. A missing itinerary day or invalid cost is a definite error, so Java can catch it without asking a model. We'll first test those checks against plans with known contents. Once they work, we'll test the workflow and then the quality of a live plan.
+
+The supplied evaluation code loads the samples, checks plans, runs the planner, and retrieves scores. Copy it into the working project before running the tests.
+
+==For the hands-on route, copy these paths from `section-3/step-07/trip-planner` to the same paths in your working copy:==
+
+- `src/test/java/com/tripplanner/evaluation/` (the invariant strategy, the dataset loader, the experiment runner, and all the tests)
+- `src/test/resources/evaluation/known-bad.yaml` (plans with deliberate defects)
+- `src/test/resources/application.properties` (test profiles for the offline, composition, and quality runs)
+- `src/main/java/com/tripplanner/agentic/TracingExecutorSetup.java` (keeps one planning run in one trace)
+
+`TripPlanText` converts plans to JSON for evaluation and parses that JSON when the structural checks need to inspect a field.
+
+A plan needs a complete itinerary and a valid cost before we assess its recommendations. `TripPlanInvariantStrategy` checks those fields in Java and implements `EvaluationStrategy<String>` so the evaluation module can run it against each sample.
+
+```java title="TripPlanInvariantStrategy.java (the checks)"
+--8<-- "../../section-3/step-07/trip-planner/src/test/java/com/tripplanner/evaluation/TripPlanInvariantStrategy.java:26:71"
 ```
 
-The suite loads the samples from `samples.yaml`, applies the invariant strategy to known-good and known-bad outputs, and verifies the judge contract and the recorder. When you change a prompt, a skill, or a model, run this suite first. It is fast enough to run after every edit, and a red invariant check on a known-good sample means the rendering or the plan shape changed in a way the gate now detects.
+The requested duration comes from the sample's third parameter. The strategy collects every problem it finds instead of stopping at the first one:
 
-## Configuring telemetry for the live runs
+- The vehicle must have a type, model, and reasoning, and the plan needs a route overview.
+- The itinerary must have exactly the requested number of days, each with a title, description, and overnight stop.
+- Day numbers must be unique, fall between 1 and the requested duration, and leave no gaps.
+- The total cost must be a plain, non-negative euro amount.
 
-Because `quarkus-langfuse` and `quarkus-opentelemetry` are runtime dependencies, Langfuse Dev Services starts automatically whenever you run the application — in dev mode, traces appear in Langfuse as planning runs complete. You can find the UI URL, login credentials, and all injected configuration in the Dev UI under **Dev Services**. You may notice that startup takes longer than in previous steps: Dev Services is now pulling and starting containers for Kafka, PostgreSQL, and Langfuse. In production none of those would be managed by Quarkus, so startup time would be unaffected.
+A plan with no problems scores 1, and anything else scores 0 with the list of problems as the reason.
+
+To check that the strategy detects defects, `known-bad.yaml` contains plans with a missing vehicle, a gap in the itinerary, a negative or non-numeric cost, and an empty output. `TripPlanInvariantStrategyTest` checks that each fails for the expected reason and that a complete plan passes.
+
+## Run the offline tests
+
+`TripPlanEvaluationHarnessTest` checks that the harness loads the samples and applies the requested duration to each fixture plan. It also checks that a one-day plan fails a request for a longer trip and that the results can be saved as a JSON report. Maven runs this test alongside the invariant strategy tests by default.
+
+==Run the default test suite from your `trip-planner` directory:==
+
+=== "Linux / macOS"
+    ```bash
+    ./mvnw test
+    ```
+
+=== "Windows"
+    ```cmd
+    .\mvnw.cmd test
+    ```
+
+These tests tell us whether the structural checks recognize known good and bad plans. If a deliberately broken plan passes, or a valid fixture fails, investigate the checks before relying on their results. They do not tell us whether the agents exchange the right information during a real planning run, which is what we'll test next.
+
+## Test the workflow with scripted responses
+
+Now we can test whether the agents pass the right data through the workflow. The composition test uses scripted model responses while the two `@McpClientAgent` subagents call the running Trip Intelligence server. With model responses fixed, a failed assertion points to the workflow or its MCP data rather than a change in the model's wording.
+
+`TripPlannerCompositionLiveIT` has two tests:
+
+- The first plans a Rome trip, checks that the weather and points of interest from the MCP server reached the itinerary planner's prompt, and runs the invariant strategy on the saved output.
+- The second plans two trips in a row and checks that each plan keeps its own request's destination.
+
+The test's `mcp` profile disables Langfuse because these assertions use the plan and the captured prompts. Before each test, it probes the MCP server on port 8085 and skips if the server isn't running the sunny fixture.
+
+==With the MCP server running, run the composition IT from your `trip-planner` directory:==
+
+=== "Linux / macOS"
+    ```bash
+    ./mvnw -Pevals -Dit.test=TripPlannerCompositionLiveIT -Dquarkus.http.test-port=0 verify
+    ```
+
+=== "Windows"
+    ```cmd
+    .\mvnw.cmd -Pevals -Dit.test=TripPlannerCompositionLiveIT -Dquarkus.http.test-port=0 verify
+    ```
+
+## Evaluating recommendation quality
+
+The composition test confirms that the workflow connects its parts, but scripted replies cannot tell us whether the configured model recommends suitable activities. The quality test generates a new plan for the Rome sample, checks its structure, and asks Langfuse to assess its recommendations against the saved requirements.
+
+Before planning, the test checks that the MCP server is running the sunny fixture and that the `trip-plan-samples` dataset exists in Langfuse. If the dataset is missing, the test fails and tells you to start dev mode first, since dev mode is what creates it. The test then loads the `rome-family-three-days` item from the dataset and passes it to a small helper bean that runs the planner:
+
+```java title="TripPlanQualityEvaluationLiveIT.java (running the dataset item)"
+--8<-- "../../section-3/step-07/trip-planner/src/test/java/com/tripplanner/evaluation/TripPlanQualityEvaluationLiveIT.java:49:56"
+```
+
+The runner records the planning calls in a trace and returns the plan together with its trace id. The test checks the plan's structure before waiting for the judge's score:
+
+```java title="TripPlanQualityEvaluationLiveIT.java (waiting for the score)"
+--8<-- "../../section-3/step-07/trip-planner/src/test/java/com/tripplanner/evaluation/TripPlanQualityEvaluationLiveIT.java:63:72"
+```
+
+Langfuse evaluates the plan asynchronously in its worker container, so the test polls for the trace's `plan-quality` score for up to 90 seconds. It passes when the structural checks succeed, the score is at least 0.7, and the judge has supplied a reason.
+
+The test's `evals` profile connects to the Langfuse instance started by dev mode, where the dataset and evaluator have been created. It uses the Dev Services credentials and disables the generic OTLP exporter because the Langfuse extension exports the traces itself.
+
+```properties title="src/test/resources/application.properties (quality evaluation profile)"
+--8<-- "../../section-3/step-07/trip-planner/src/test/resources/application.properties:43:46"
+```
+
+Keep dev mode running while you evaluate plans and inspect their traces. The test is skipped unless you pass its Langfuse URL through `quarkus.langfuse.base-url`.
+
+==Start dev mode in your working project with `./mvnw quarkus:dev` (`.\mvnw.cmd quarkus:dev` on Windows), with `OPENAI_API_KEY` set, and keep the MCP server running. Open the Dev UI at [http://localhost:8080/q/dev](http://localhost:8080/q/dev){target="_blank"}, go to **Dev Services**, and copy the `quarkus.langfuse.base-url` value from the Langfuse entry.==
 
 ![The Dev UI Dev Services page showing the Langfuse container with its injected configuration: API endpoint, host, port, UI URL, login credentials, and API keys](../images/section-3-step-07-devui-dev-services.png)
 
-The Extensions page also has a Quarkus Langfuse card with a direct link to the Langfuse UI, and an Observability card for the OpenTelemetry stack.
+The same page lists the Langfuse login, `quarkus@quarkus.io` with the password `quarkuslangfuse`. The Extensions page also has a Quarkus Langfuse card with a direct link to the Langfuse UI.
 
-![The Dev UI Extensions page with Quarkus Langfuse and Observability cards](../images/section-3-step-07-devui-extensions.png)
+==Check the dev mode log for the `Langfuse evaluation setup` messages before running the test.== Each completed setup operation logs a ready message. If the log reports a warning, resolve the reported setup failure before continuing.
 
-The tests need a bit more care. The offline suite runs with no containers and no network, so the `%test` profile disables Dev Services and points the OTLP exporter at a dead endpoint. The `%mcp` profile does the same because the composition IT checks plan structure rather than telemetry. The `%evals` profile, by contrast, keeps Dev Services on (it is already the default), marks the container as shared so Failsafe reuses the one already running rather than starting a fresh instance, and widens the span filter so the planning root span — which carries no `gen_ai` attributes — is not dropped from the trace.
+==In a second terminal, run the quality IT from your `trip-planner` directory, using the URL you copied:==
 
-==Add the following to your `src/test/resources/application.properties`:==
+=== "Linux / macOS"
+    ```bash
+    ./mvnw -Pevals -Dit.test=TripPlanQualityEvaluationLiveIT -Dquarkus.http.test-port=0 \
+        -Dquarkus.langfuse.base-url=http://localhost:<port> verify
+    ```
 
-```properties title="application.properties (test telemetry config)"
---8<-- "../../section-3/step-07/trip-planner/src/test/resources/application.properties:18:42"
+=== "Windows"
+    ```cmd
+    .\mvnw.cmd -Pevals -Dit.test=TripPlanQualityEvaluationLiveIT -Dquarkus.http.test-port=0 -Dquarkus.langfuse.base-url=http://localhost:<port> verify
+    ```
+
+??? info "Complete quality IT"
+    ```java title="TripPlanQualityEvaluationLiveIT.java"
+    --8<-- "../../section-3/step-07/trip-planner/src/test/java/com/tripplanner/evaluation/TripPlanQualityEvaluationLiveIT.java"
+    ```
+
+## Inspect the score and the planning trace
+
+A passing test tells us that the plan met the structural checks and scored at least 0.7. To understand which requirements affected the score, we need to read the judge's explanation alongside the plan.
+
+==Open Langfuse from the Quarkus Langfuse card, log in, and go to **Tracing**. Open the `trip-plan-evaluation` trace, select its root span in the tree, and select the **Scores** tab.==
+
+![The trip-plan-evaluation trace in Langfuse with the full agent tree, from the MCP weather and points-of-interest calls through the vehicle, itinerary, evaluator, and cost agents, and a plan-quality score of 0.85 on the root span with the judge's reasoning](../images/section-3-step-07-langfuse-score.png)
+
+Read the `plan-quality` score and its explanation first. Compare any missed requirement with the saved sample and the generated plan before deciding whether the planner needs a change. A low score can also reflect a mistaken judgment, so the explanation matters as much as the number.
+
+The trace shows the calls that produced the plan. The MCP weather and points-of-interest calls feed the vehicle advisor and itinerary planner; the evaluators and any vehicle revision follow, then the cost estimator calls its pricing tool. The header shows latency, cost, and token counts for the run. The score is on the root span, where the experiment records the completed plan.
+
+==Open the score's comment and find any requirement the judge says was missed.== Check the plan against that requirement. If the plan is wrong, inspect the relevant agent's prompt and response. For a recommendation that depends on weather or points of interest, check the MCP tool result as well. If the explanation misreads the plan, review the rubric before treating the score as evidence of a regression.
+
+### Keep parallel calls in one trace
+
+The vehicle and itinerary research run in parallel. By default, the executor used for those branches does not carry the current OpenTelemetry context to the new threads, so one planning run would appear as several unrelated traces. The `TracingExecutorSetup` copied earlier wraps that executor and carries the context into each branch.
+
+```java title="TracingExecutorSetup.java"
+--8<-- "../../section-3/step-07/trip-planner/src/main/java/com/tripplanner/agentic/TracingExecutorSetup.java:20:31"
 ```
 
-## Adding the evals Maven profile
+At startup, `Context.taskWrapping()` wraps the Quarkus managed executor that LangChain4j uses for parallel branches. Their agent calls then appear under the same planning trace you just inspected.
 
-The live evaluation tests run under a separate Maven profile so `./mvnw test` never triggers them. The profile selects only the `*LiveIT` classes through Failsafe.
+??? info "How the trace becomes a dataset experiment"
+    The experiment name is `step-07-` followed by the current time, so each run of the IT shows up as a separate run of the dataset in Langfuse. The helper bean runs the planner inside a root span:
 
-==Add the `evals` profile to your `trip-planner/pom.xml`, inside the `<profiles>` block:==
+    ```java title="TripPlanExperimentRunner.java"
+    --8<-- "../../section-3/step-07/trip-planner/src/test/java/com/tripplanner/evaluation/TripPlanExperimentRunner.java:34:55"
+    ```
 
-```xml title="pom.xml (evals profile)"
---8<-- "../../section-3/step-07/trip-planner/pom.xml:192:222"
-```
+    `@WithSpan("trip-plan-evaluation")` opens a span for the whole planning run, so every agent, guardrail, and MCP call is recorded beneath it. The attributes on that span turn the trace into an experiment item:
 
-## Live evaluation: the composition run
+    - `langfuse.experiment.dataset.id` and `langfuse.experiment.item.id` tie the trace to the dataset item it came from.
+    - `langfuse.experiment.id` and `langfuse.experiment.name` both get the experiment name, which groups the trace with the other items of the same run.
+    - `langfuse.experiment.item.root_observation_id` is the span's own id, which tells Langfuse where the result of the run is.
+    - `langfuse.experiment.item.expected_output` carries the sample's expected output, which the judge reads as `{{ground_truth}}`.
+    - `langfuse.observation.input` and `langfuse.observation.output` hold the trip request and the rendered plan, which become `{{input}}` and `{{output}}`.
+    - `langfuse.trace.tags` tags the trace with `evaluation`, and the two `langfuse.trace.metadata.*` attributes record the sample id and the planner's model name, so you can filter traces by them when you run the IT several times.
 
-The composition run drives the full planning graph with a scripted model while the two `@McpClientAgent` subagents call the real Trip Intelligence server. No LLM is called, so it is cheap to run, but it exercises the argument flow, the MCP data path, and the request isolation of the complete workflow. Each saved output is checked by the invariant strategy and recorded.
+## Compare plans after a change
 
-==Create `src/test/java/com/tripplanner/evaluation/TripPlannerCompositionLiveIT.java`:==
+To compare results, we need a second evaluation of the same request. ==Change a planner prompt or skill, then rerun the quality test with dev mode still running.== Keep the sample requirements and rubric unchanged so both plans are assessed against the same criteria.
 
-```java title="TripPlannerCompositionLiveIT.java"
---8<-- "../../section-3/step-07/trip-planner/src/test/java/com/tripplanner/evaluation/TripPlannerCompositionLiveIT.java"
-```
+==Go to **Datasets**, open `trip-plan-samples`, and select the **Experiments** tab. Select two runs and click **Compare**.==
 
-The test uses a `ScriptedProfile` that activates the `mcp` config profile and substitutes a `ScriptedModel` that returns deterministic responses for each agent. The `@BeforeEach` method probes the MCP server on port 8085 and skips the test if it isn't running the sunny fixture, so the suite stays green in environments without the server.
+![Two step-07 experiment runs of the trip-plan-samples dataset compared in Langfuse, with plan-quality scores of 0.85 and 0.80 for the rome-family-three-days item, the difference between them, the item's input, and its expected output](../images/section-3-step-07-langfuse-dataset-runs.png)
 
-`aRomeFamilyTripPassesItsInvariantsAndIsRecorded()` plans a Rome trip, verifies that the real weather and POI data from the MCP server reached the itinerary planner's prompt, runs the invariant strategy on the saved output, and records the result. `requestIsolationMeansASecondDestinationIsIndependent()` plans two trips in sequence and checks that the first plan doesn't leak the second request's destination.
+Each quality test adds an experiment for the `rome-family-three-days` item. The comparison shows both generated plans and their scores beside the request and expected output. ==Open the speech-bubble icon next to each score to read the judge's reasoning.== Compare the explanations with the plans to see whether the change addressed the requirement you were interested in. A single pair of runs is only a starting point because both generation and judging can vary between runs.
 
-==Start the MCP server in `section-3/step-07/mcp-server`, then run the composition IT:==
+### Adjust the rubric
 
-```shell
-./mvnw -f section-3/step-07/pom.xml -pl trip-planner -Pevals -Dit.test=TripPlannerCompositionLiveIT -Dquarkus.http.test-port=0 verify
-```
+If the judge repeatedly misinterprets a requirement, try making the rubric more specific. ==Open **Evaluators** and select **plan-quality**.==
 
-The test asserts that the real fixture data reached the research agents, that the saved plan passes the invariants, and that a second request for a different destination is independent of the first.
+The evaluator's prompt contains the rubric from `rubric.txt`. You can edit it here and rerun the quality test to inspect the judge's explanation with the revised instructions. Changing the rubric also changes the basis for the score, so treat this as an adjustment to the evaluation itself.
 
-## Publishing scores to Langfuse
+==Copy any rubric changes you want to keep into `src/main/resources/evaluation/rubric.txt`.== Dev Services removes the Langfuse containers when dev mode stops, and the next start recreates the evaluator from that file.
 
-Before we write the quality evaluation test, we need a way to publish evaluation scores to Langfuse and verify they land on the correct trace.
+### Inspect model costs and latency
 
-==Create `src/test/java/com/tripplanner/evaluation/LangfuseScorePublisher.java`:==
-
-```java title="LangfuseScorePublisher.java"
---8<-- "../../section-3/step-07/trip-planner/src/test/java/com/tripplanner/evaluation/LangfuseScorePublisher.java"
-```
-
-`publishScore()` creates a numeric score on the run's trace id with metadata carrying the sample id and model name. `scoreIsQueryable()` checks whether the score has been ingested and is queryable on a given trace. Score ingestion in Langfuse is asynchronous, so callers must retry rather than assuming the score is queryable immediately after creation.
-
-## Live evaluation: the quality run
-
-The quality run performs one real planning run with your configured model, captures the planning trace while the root span is current, applies the invariant strategy and the judge to the saved output, and publishes the resulting score to Langfuse. It then verifies through the score API that the score landed on exactly the trace of the run it measured.
-
-==Create `src/test/java/com/tripplanner/evaluation/TripPlanQualityEvaluationLiveIT.java`:==
-
-```java title="TripPlanQualityEvaluationLiveIT.java"
---8<-- "../../section-3/step-07/trip-planner/src/test/java/com/tripplanner/evaluation/TripPlanQualityEvaluationLiveIT.java"
-```
-
-The test opens a root span around the planning call so the agent invocations create child spans on the same trace. It captures the trace id while the span is current, because the id is only stable while the span is open. After the planning run, it renders the saved output, runs the invariant gate, runs the AI judge, builds an `EvaluationRun`, publishes the aggregate score to Langfuse, and uses Awaitility to retry until the score is queryable on the correct trace. A final check confirms the score is not queryable on an unrelated trace.
-
-The test is gated by `@EnabledIf("containerRuntimeAvailable")` so it skips cleanly when Docker or Podman is not installed.
-
-==Run the quality IT with a container runtime available:==
-
-```shell
-./mvnw -f section-3/step-07/pom.xml -pl trip-planner -Pevals -Dit.test=TripPlanQualityEvaluationLiveIT -Dquarkus.http.test-port=0 verify
-```
-
-The first run pulls the Langfuse Dev Services images, which is a several-hundred-megabyte download. Subsequent runs reuse them.
-
-## What to look for in Langfuse
-
-With the quality run complete, the Langfuse UI shows the planning trace with its spans and the attached `plan-quality` score. The score's metadata carries the sample id and the model name, so you can filter by sample or by model when you run the suite several times.
+==Open the project dashboard to inspect model costs and timing across the recorded runs.== The trace names identify the agents and tools, which helps locate the calls responsible for a slow or expensive plan.
 
 ![The Langfuse project dashboard showing 8 traces, model costs, and per-agent trace names including getWeatherForecast, getPointsOfInterest, and the AI service agents](../images/section-3-step-07-langfuse-dashboard.png)
 
-Scroll down to see trace latencies, generation times, and observation spans. The tooltip on a trace name shows the full agent class and method, so you can match a slow span to a specific agent in your code.
+==Scroll down to the latency charts and hover over a trace name.== The tooltip shows the agent class and method so you can locate the corresponding code.
 
 ![The Langfuse dashboard latencies view with per-trace, per-generation, and per-observation timing percentiles](../images/section-3-step-07-langfuse-latencies.png)
 
-Use the trace to read what the run actually did. The LLM spans show the prompts and responses, and the MCP spans show the tool calls and their results. If a sample fails its judge check, the trace is where you find out whether the model ignored the MCP data, reasoned from it, or produced a plan the judge could not match to the expected output.
+## Further reading
 
-## What's next?
+Eric Deandrea's [non-deterministic-no-problem](https://github.com/edeandrea/non-deterministic-no-problem){target="_blank"} project uses the same Quarkus Langfuse extension and goes further than this step. It detects drift in a running application with a guardrail and scores whole sessions as well as single traces. The Langfuse documentation on [running experiments through OpenTelemetry](https://langfuse.com/integrations/native/opentelemetry/experiments){target="_blank"} describes the `langfuse.experiment.*` attributes the quality run sets.
 
-The trip planner is now backed by a repeatable evaluation harness: deterministic invariant checks catch structural problems without calling a model, a judge measures qualitative fitness against a rubric, and every live run produces a trace in Langfuse with its evaluation score attached. That's the end of Section 3. Head to the [conclusion](conclusion.md) for a recap of the enterprise patterns you've built across all seven steps.
+You can now rerun a trip request after changing the planner and inspect how the generated plan meets its requirements. This completes Section 3. Continue to the [conclusion](conclusion.md) to review the workshop.
