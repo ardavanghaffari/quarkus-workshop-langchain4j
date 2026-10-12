@@ -3,7 +3,7 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: miles-and-smiles
-  namespace: miles-and-smiles
+  namespace: ardavan-ghaffari-dev
   labels:
     app.kubernetes.io/name: miles-and-smiles
     app.kubernetes.io/version: 1.0.0
@@ -12,7 +12,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: view-secrets
-  namespace: miles-and-smiles
+  namespace: ardavan-ghaffari-dev
   labels:
     app.kubernetes.io/name: miles-and-smiles
 rules:
@@ -28,7 +28,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: miles-and-smiles-view-secrets
-  namespace: miles-and-smiles
+  namespace: ardavan-ghaffari-dev
   labels:
     app.kubernetes.io/name: miles-and-smiles
 roleRef:
@@ -38,13 +38,13 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: miles-and-smiles
-    namespace: miles-and-smiles
+    namespace: ardavan-ghaffari-dev
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: miles-and-smiles
-  namespace: miles-and-smiles
+  namespace: ardavan-ghaffari-dev
   labels:
     app.kubernetes.io/name: miles-and-smiles
     app.kubernetes.io/version: 1.0.0
@@ -62,7 +62,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: miles-and-smiles
-  namespace: miles-and-smiles
+  namespace: ardavan-ghaffari-dev
   labels:
     app.kubernetes.io/name: miles-and-smiles
     app.kubernetes.io/version: 1.0.0
@@ -80,7 +80,7 @@ spec:
       serviceAccountName: miles-and-smiles
       containers:
         - name: miles-and-smiles
-          image: quay.io/kevindubois/miles-and-smiles:latest
+          image: image-registry.openshift-image-registry.svc:5000/ardavan-ghaffari-dev/miles-and-smiles:latest
           imagePullPolicy: Always
           ports:
             - containerPort: 8080
@@ -159,25 +159,3 @@ spec:
             timeoutSeconds: 10
             failureThreshold: 30
       terminationGracePeriodSeconds: 10
----
-apiVersion: gateway.networking.k8s.io/v1
-kind: HTTPRoute
-metadata:
-  name: miles-and-smiles
-  namespace: miles-and-smiles
-  labels:
-    app.kubernetes.io/name: miles-and-smiles
-spec:
-  parentRefs:
-    - name: default-gateway
-      namespace: openshift-ingress
-  hostnames:
-    - miles-and-smiles.apps.cluster.example.com
-  rules:
-    - matches:
-        - path:
-            type: PathPrefix
-            value: /
-      backendRefs:
-        - name: miles-and-smiles
-          port: 80

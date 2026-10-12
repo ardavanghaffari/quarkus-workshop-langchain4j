@@ -3,7 +3,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: miles-and-smiles-config
-  namespace: miles-and-smiles
+  namespace: ardavan-ghaffari-dev
 data:
   # PostgreSQL connection details
   POSTGRES_HOST: "postgresql"

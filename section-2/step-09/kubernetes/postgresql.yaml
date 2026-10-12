@@ -3,7 +3,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: postgresql
-  namespace: miles-and-smiles
+  namespace: ardavan-ghaffari-dev
   labels:
     app: postgresql
 spec:
@@ -20,7 +20,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: postgresql
-  namespace: miles-and-smiles
+  namespace: ardavan-ghaffari-dev
   labels:
     app: postgresql
 spec:
@@ -80,6 +80,27 @@ spec:
             periodSeconds: 5
             timeoutSeconds: 3
             failureThreshold: 3
+          # PostgreSQL was still initializing when its liveness probe began checking it.
+          # The probe failed because PostgreSQL was not yet accepting connections, so Kubernetes
+          # restarted the container. The restart kept the pod's temporary data directory, which
+          # contained an incomplete database setup. PostgreSQL then skipped initialization, leaving
+          # out the milesandsmiles database and the remote-client access rule. Kubernetes marked
+          # the restarted pod Ready because PostgreSQL itself was listening, but the application
+          # could not connect to the incomplete database. The liveness probe starts checking after
+          # 30 seconds and restarts the container after three failed checks. Kubernetes does not run
+          # liveness or readiness probes for as long as the startup probe runs. It gives PostgreSQL
+          # up to roughly five minutes to start successfully, then the original liveness probe
+          # takes over.
+          startupProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - pg_isready -U $POSTGRES_USER
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
       volumes:
         - name: postgres-storage
-          emptyDir: {}
+          emptyDir: { }

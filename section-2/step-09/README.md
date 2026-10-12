@@ -1,9 +1,8 @@
 # Miles and Smiles - Kubernetes Deployment
 
-This step demonstrates deploying the multi-agent car management system to Kubernetes/OpenShift with two routing options:
-
-1. **OpenShift Route** (recommended for OpenShift) - Auto-generates hostname with TLS
-2. **Gateway API HTTPRoute** (for standard Kubernetes) - Requires manual hostname configuration
+This step deploys the multi-agent car management system to the existing
+`ardavan-ghaffari-dev` Red Hat Developer Sandbox project. It uses an OpenShift
+Route, which automatically generates the hostname and terminates TLS.
 
 ## Architecture
 
@@ -15,11 +14,11 @@ The deployment consists of:
 
 ## Prerequisites
 
-- Kubernetes cluster (OpenShift 4.21+ recommended)
-- `kubectl` CLI configured
+- OpenShift CLI credentials for the `ardavan-ghaffari-dev` project
+- `kubectl` CLI configured to use the same cluster credentials
 - JBang installed (`curl -Ls https://sh.jbang.dev | bash -s - app setup`)
 - OpenAI API key
-- Container registry access (Quay.io configured in this example)
+- Access to the Sandbox integrated image registry
 
 ## Quick Start
 
@@ -30,7 +29,19 @@ The deployment consists of:
    export OPENAI_API_KEY=your-key-here
    ```
 
-2. **Deploy everything with a single command:**
+2. **Log in to the integrated registry.** This is required before the image
+   push. It stores a registry token in your local container-tool credentials;
+   it does not create or change a cluster resource.
+
+   ```bash
+   oc registry login
+   ```
+
+   If the Quarkus image push does not find those credentials, authenticate the
+   container tool used by your Quarkus container-image extension with the token
+   from `oc whoami -t`, then rerun the push.
+
+3. **Deploy everything with a single command:**
    ```bash
    ./deploy.java all
    ```
@@ -38,13 +49,12 @@ The deployment consists of:
 This will automatically:
 - Build both container images
 - Push them to the registry
-- Create the Kubernetes namespace
 - Create secrets (including your OPENAI_API_KEY)
 - Deploy PostgreSQL
 - Deploy the A2A agent
 - Deploy the main application
 
-3. **Get the application URL:**
+4. **Get the application URL:**
    ```bash
    ./deploy.java get-route
    ```
@@ -58,22 +68,27 @@ If you prefer to run each step individually:
    export OPENAI_API_KEY=your-key-here
    ```
 
-2. **Build container images:**
+2. **Log in to the integrated registry:**
+   ```bash
+   oc registry login
+   ```
+
+3. **Build container images:**
    ```bash
    ./deploy.java build
    ```
 
-3. **Push images to registry:**
+4. **Push images to registry:**
    ```bash
    ./deploy.java push
    ```
 
-4. **Deploy to Kubernetes:**
+5. **Deploy to Kubernetes:**
    ```bash
    ./deploy.java deploy
    ```
 
-5. **Get the application URL:**
+6. **Get the application URL:**
    ```bash
    ./deploy.java get-route
    ```
@@ -82,7 +97,7 @@ If you prefer to run each step individually:
 
 The `deploy.java` JBang script provides the following commands:
 
-- `./deploy.java all` - **Build, push, and deploy everything in one command** (recommended)
+- `./deploy.java all` - **Build, push, and deploy everything in one command**
 - `./deploy.java build` - Build both container images locally
 - `./deploy.java push` - Build and push images to registry
 - `./deploy.java deploy` - Deploy all components to Kubernetes (creates secrets)
@@ -98,16 +113,12 @@ The `deploy.java` JBang script provides the following commands:
 
 ### Container Registry
 
-Update the registry settings in both `application.properties` files:
+The image push targets this Sandbox registry and project:
 
 ```properties
-quarkus.container-image.registry=quay.io
-quarkus.container-image.group=your-username
+quarkus.container-image.registry=default-route-openshift-image-registry.apps.rm3.7wse.p1.openshiftapps.com
+quarkus.container-image.group=ardavan-ghaffari-dev
 ```
-
-### External Access Options
-
-**Option 1: OpenShift Route (Recommended for OpenShift)**
 
 The OpenShift Route (`kubernetes/route.yaml`) automatically generates a hostname and provides TLS termination. This is deployed by default with `./deploy.java all` or `./deploy.java deploy`.
 
@@ -115,21 +126,6 @@ To get the URL:
 ```bash
 ./deploy.java get-route
 ```
-
-**Option 2: Gateway API HTTPRoute (For Standard Kubernetes)**
-
-If you're not using OpenShift, you can use the Gateway API HTTPRoute included in `kubernetes/main-app.yaml`. You'll need to:
-
-1. Remove or skip the OpenShift Route deployment
-2. Configure your Gateway controller (e.g., Istio, Envoy Gateway)
-3. Update the hostname in `kubernetes/main-app.yaml`:
-   ```yaml
-   spec:
-     hostnames:
-       - miles-and-smiles.apps.your-cluster.example.com
-   ```
-
-To use Gateway API only, comment out the route deployment in `deploy.java` or manually deploy without `route.yaml`.
 
 ### OpenAI Configuration
 
@@ -150,8 +146,8 @@ The main application connects to the remote A2A pricing agent using the Agent-to
 - A2A agent: `http://localhost:8888` (to avoid port conflicts)
 
 **Production Mode (Kubernetes):**
-- Main app: `http://miles-and-smiles.miles-and-smiles.svc.cluster.local`
-- A2A agent: `http://miles-and-smiles-a2a.miles-and-smiles.svc.cluster.local` (port 80 → 8080)
+- Main app: `http://miles-and-smiles.ardavan-ghaffari-dev.svc.cluster.local`
+- A2A agent: `http://miles-and-smiles-a2a.ardavan-ghaffari-dev.svc.cluster.local` (port 80 → 8080)
 
 #### Agent Card Configuration
 
@@ -161,7 +157,7 @@ The A2A agent card must return the correct URL for the environment. This is conf
 ```properties
 # Base URL for agent card - used by PricingAgentCard
 a2a.base-url=http://localhost:8888/
-%prod.a2a.base-url=http://miles-and-smiles-a2a.miles-and-smiles.svc.cluster.local/
+%prod.a2a.base-url=http://miles-and-smiles-a2a.ardavan-ghaffari-dev.svc.cluster.local/
 ```
 
 The `PricingAgentCard` class injects this property to generate the correct URLs in the agent card:
@@ -188,11 +184,11 @@ The A2A client fetches the agent card from this URL, extracts the actual endpoin
 
 **Important:** The A2A agent must be running and accessible before the main application starts, as it fetches the agent card during initialization.
 
-## Kubernetes Resources
+## OpenShift Resources
 
-The deployment creates the following resources in the `miles-and-smiles` namespace:
+The deployment creates the following resources in the existing
+`ardavan-ghaffari-dev` project:
 
-- **Namespace**: `miles-and-smiles`
 - **ConfigMap**: Application configuration (database, A2A URL, OpenAI settings)
 - **Secret**: Sensitive data (OpenAI API key, database credentials)
 - **PostgreSQL Deployment**: Database with ephemeral storage
@@ -201,7 +197,7 @@ The deployment creates the following resources in the `miles-and-smiles` namespa
 - **Main App Service**: Internal service access
 - **A2A Agent Deployment**: Remote pricing agent
 - **A2A Agent Service**: Internal A2A access
-- **HTTPRoute**: External access via Gateway API
+- **Route**: External HTTPS access
 
 ## Database
 
@@ -225,7 +221,7 @@ Both applications include Quarkus SmallRye Health endpoints:
 
 ### Check pod status:
 ```bash
-kubectl get pods -n miles-and-smiles
+kubectl get pods -n ardavan-ghaffari-dev
 ```
 
 ### View logs:
@@ -237,8 +233,8 @@ kubectl get pods -n miles-and-smiles
 
 ### Describe resources:
 ```bash
-kubectl describe deployment miles-and-smiles -n miles-and-smiles
-kubectl describe httproute miles-and-smiles -n miles-and-smiles
+kubectl describe deployment miles-and-smiles -n ardavan-ghaffari-dev
+kubectl describe route miles-and-smiles -n ardavan-ghaffari-dev
 ```
 
 ### Access via port-forward (if route is not working):
@@ -260,4 +256,3 @@ The application uses Quarkus profiles:
 - Set up monitoring and observability
 - Configure resource limits and requests
 - Set up horizontal pod autoscaling
-- Configure TLS/SSL for HTTPRoute

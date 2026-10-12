@@ -21,6 +21,10 @@ import java.util.concurrent.Callable;
         subcommands = {CommandLine.HelpCommand.class})
 class deploy implements Callable<Integer> {
 
+    private static final String NAMESPACE = "ardavan-ghaffari-dev";
+    private static final String EXTERNAL_REGISTRY =
+            "default-route-openshift-image-registry.apps.rm3.7wse.p1.openshiftapps.com";
+
     @Command(name = "all", description = "Build, push, and deploy everything (requires OPENAI_API_KEY env var)")
     int all() {
         System.out.println("=== Miles and Smiles Complete Deployment ===\n");
@@ -75,12 +79,16 @@ class deploy implements Callable<Integer> {
     int push() {
         System.out.println("Building and pushing multi-agent-system image...");
         if (runCommand("multi-agent-system", "./mvnw", "quarkus:image-push", 
-                "-Dquarkus.container-image.build=true") != 0) {
+                "-Dquarkus.container-image.build=true",
+                "-Dquarkus.container-image.registry=" + EXTERNAL_REGISTRY,
+                "-Dquarkus.container-image.group=" + NAMESPACE) != 0) {
             return 1;
         }
         System.out.println("Building and pushing remote-a2a-agent image...");
         if (runCommand("remote-a2a-agent", "./mvnw", "quarkus:image-push", 
-                "-Dquarkus.container-image.build=true") != 0) {
+                "-Dquarkus.container-image.build=true",
+                "-Dquarkus.container-image.registry=" + EXTERNAL_REGISTRY,
+                "-Dquarkus.container-image.group=" + NAMESPACE) != 0) {
             return 1;
         }
         System.out.println("Push complete!");
@@ -96,9 +104,6 @@ class deploy implements Callable<Integer> {
             return 1;
         }
 
-        System.out.println("Creating namespace...");
-        if (kubectl("apply", "-f", "kubernetes/namespace.yaml") != 0) return 1;
-
         System.out.println("Creating ConfigMap...");
         if (kubectl("apply", "-f", "kubernetes/configmap.yaml") != 0) return 1;
 
@@ -110,7 +115,7 @@ class deploy implements Callable<Integer> {
 
         System.out.println("Waiting for PostgreSQL to be ready...");
         if (kubectl("wait", "--for=condition=ready", "pod", "-l", "app=postgresql", 
-                "-n", "miles-and-smiles", "--timeout=120s") != 0) return 1;
+                "-n", NAMESPACE, "--timeout=120s") != 0) return 1;
 
         System.out.println("Deploying A2A Agent...");
         if (kubectl("apply", "-f", "kubernetes/a2a-agent.yaml") != 0) return 1;
@@ -118,7 +123,7 @@ class deploy implements Callable<Integer> {
         System.out.println("Waiting for A2A Agent to be ready...");
         if (kubectl("wait", "--for=condition=ready", "pod", 
                 "-l", "app.kubernetes.io/name=miles-and-smiles-a2a",
-                "-n", "miles-and-smiles", "--timeout=120s") != 0) return 1;
+                "-n", NAMESPACE, "--timeout=120s") != 0) return 1;
 
         System.out.println("Deploying Main Application...");
         if (kubectl("apply", "-f", "kubernetes/main-app.yaml") != 0) return 1;
@@ -126,7 +131,7 @@ class deploy implements Callable<Integer> {
         System.out.println("Waiting for Main Application to be ready...");
         if (kubectl("wait", "--for=condition=ready", "pod",
                 "-l", "app.kubernetes.io/name=miles-and-smiles",
-                "-n", "miles-and-smiles", "--timeout=120s") != 0) return 1;
+                "-n", NAMESPACE, "--timeout=120s") != 0) return 1;
 
         System.out.println("Creating OpenShift Route...");
         if (kubectl("apply", "-f", "kubernetes/route.yaml") != 0) return 1;
@@ -135,7 +140,7 @@ class deploy implements Callable<Integer> {
         System.out.println("\n" + "=".repeat(50));
         System.out.println("Application URL:");
         System.out.println("=".repeat(50));
-        kubectl("get", "route", "miles-and-smiles", "-n", "miles-and-smiles",
+        kubectl("get", "route", "miles-and-smiles", "-n", NAMESPACE,
                 "-o", "jsonpath={.spec.host}");
         System.out.println("\n" + "=".repeat(50));
         return 0;
@@ -150,7 +155,6 @@ class deploy implements Callable<Integer> {
         kubectl("delete", "-f", "kubernetes/postgresql.yaml");
         kubectl("delete", "-f", "kubernetes/secret.yaml");
         kubectl("delete", "-f", "kubernetes/configmap.yaml");
-        kubectl("delete", "-f", "kubernetes/namespace.yaml");
         System.out.println("Undeployment complete!");
         return 0;
     }
@@ -160,7 +164,7 @@ class deploy implements Callable<Integer> {
         System.out.println("Application URL:");
         System.out.println("================");
         System.out.print("https://");
-        kubectl("get", "route", "miles-and-smiles", "-n", "miles-and-smiles",
+        kubectl("get", "route", "miles-and-smiles", "-n", NAMESPACE,
                 "-o", "jsonpath={.spec.host}");
         System.out.println("\n");
         return 0;
@@ -169,26 +173,26 @@ class deploy implements Callable<Integer> {
     @Command(name = "logs-main", description = "View logs from main application")
     int logsMain() {
         return kubectl("logs", "-f", "-l", "app.kubernetes.io/name=miles-and-smiles",
-                "-n", "miles-and-smiles");
+                "-n", NAMESPACE);
     }
 
     @Command(name = "logs-a2a", description = "View logs from A2A agent")
     int logsA2a() {
         return kubectl("logs", "-f", "-l", "app.kubernetes.io/name=miles-and-smiles-a2a",
-                "-n", "miles-and-smiles");
+                "-n", NAMESPACE);
     }
 
     @Command(name = "logs-postgres", description = "View logs from PostgreSQL")
     int logsPostgres() {
-        return kubectl("logs", "-f", "-l", "app=postgresql", "-n", "miles-and-smiles");
+        return kubectl("logs", "-f", "-l", "app=postgresql", "-n", NAMESPACE);
     }
 
     @Command(name = "port-forward", description = "Forward main app port to localhost:8080")
     int portForward() {
         System.out.println("Forwarding main application to localhost:8080...");
-        System.out.println("This is a fallback option. The app should be accessible via the HTTPRoute.");
+        System.out.println("This is a fallback option. The app should be accessible via the OpenShift Route.");
         System.out.println("Press Ctrl+C to stop");
-        return kubectl("port-forward", "-n", "miles-and-smiles", 
+        return kubectl("port-forward", "-n", NAMESPACE,
                 "service/miles-and-smiles", "8080:80");
     }
 
@@ -213,7 +217,7 @@ class deploy implements Callable<Integer> {
         cmd.add("--from-literal=POSTGRES_USER=milesandsmiles");
         cmd.add("--from-literal=POSTGRES_PASSWORD=milesandsmiles123");
         cmd.add("--from-literal=POSTGRES_DB=milesandsmiles");
-        cmd.add("--namespace=miles-and-smiles");
+        cmd.add("--namespace=" + NAMESPACE);
         cmd.add("--dry-run=client");
         cmd.add("-o");
         cmd.add("yaml");

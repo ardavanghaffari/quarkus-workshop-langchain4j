@@ -3,7 +3,7 @@ apiVersion: route.openshift.io/v1
 kind: Route
 metadata:
   name: miles-and-smiles
-  namespace: miles-and-smiles
+  namespace: ardavan-ghaffari-dev
   labels:
     app.kubernetes.io/name: miles-and-smiles
 spec:

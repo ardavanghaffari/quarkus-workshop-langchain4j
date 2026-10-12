@@ -3,7 +3,7 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: miles-and-smiles-a2a
-  namespace: miles-and-smiles
+  namespace: ardavan-ghaffari-dev
   labels:
     app.kubernetes.io/name: miles-and-smiles-a2a
     app.kubernetes.io/version: 1.0.0
@@ -12,7 +12,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: view-secrets-a2a
-  namespace: miles-and-smiles
+  namespace: ardavan-ghaffari-dev
   labels:
     app.kubernetes.io/name: miles-and-smiles-a2a
 rules:
@@ -27,7 +27,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: miles-and-smiles-a2a-view-secrets
-  namespace: miles-and-smiles
+  namespace: ardavan-ghaffari-dev
   labels:
     app.kubernetes.io/name: miles-and-smiles-a2a
 roleRef:
@@ -37,13 +37,13 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: miles-and-smiles-a2a
-    namespace: miles-and-smiles
+    namespace: ardavan-ghaffari-dev
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: miles-and-smiles-a2a
-  namespace: miles-and-smiles
+  namespace: ardavan-ghaffari-dev
   labels:
     app.kubernetes.io/name: miles-and-smiles-a2a
     app.kubernetes.io/version: 1.0.0
@@ -61,7 +61,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: miles-and-smiles-a2a
-  namespace: miles-and-smiles
+  namespace: ardavan-ghaffari-dev
   labels:
     app.kubernetes.io/name: miles-and-smiles-a2a
     app.kubernetes.io/version: 1.0.0
@@ -79,7 +79,7 @@ spec:
       serviceAccountName: miles-and-smiles-a2a
       containers:
         - name: miles-and-smiles-a2a
-          image: quay.io/kevindubois/miles-and-smiles-a2a:latest
+          image: image-registry.openshift-image-registry.svc:5000/ardavan-ghaffari-dev/miles-and-smiles-a2a:latest
           imagePullPolicy: Always
           ports:
             - containerPort: 8080
