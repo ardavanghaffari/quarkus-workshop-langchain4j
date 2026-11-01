@@ -33,12 +33,18 @@ public class CarManagementService {
      * @param carNumber The car number
      * @param feedback Optional feedback
      * @return Uni that completes with the result of the processing
-     *
      * This method's implementation has been made asynchronous compared to the previous step.
      * Processing a car return is a blocking operation if human approval is required. Using a Uni
      * instead of a plain String as was the case in the previous step has the advantage of offloading
      * the blocking operation to a worker thread pool. The Http/event-loop thread returns immediately
-     * and is available for handling other requests.
+     * and is available for handling other requests. The execution flow is roughly:
+     * 1. event-loop thread Receives the HTTP Request and subscribes to the Uni
+     * 2. Execution moves to the worker pool
+     * 3. Worker thread executes the supplier, including the blocking processCarReturn()
+     * 4. Worker thread waits. The workflow waits for human approval. This thread remains occupied.
+     * 5. Approval arrives; workflow finishes. The Uni emits its result, allowing Quarkus to send the response to the client.
+     * Note that the HTTP request is kept open until an approval arrives. Only then the Uni can
+     * produce a result, and a HTTP response is sent back to the client.
      */
     public Uni<String> processCarReturn(Integer carNumber, String feedback) {
 
@@ -94,6 +100,12 @@ public class CarManagementService {
     
     /**
      * Find car info in a read-only transaction
+     * findCarInfo() and updateCarInfo() deliberately have separate transactions because they are
+     * called at different points in the workflow, and the CarInfo entity does not remain managed
+     * between those calls. When findCarInfo() returns, the transaction ends and the CarInfor entity
+     * is no longer attached to an active Hibernate persistence context. So the CarInfo returned by
+     * findCarInfo() is a detached entity by the time updateCarInfo() receives it. This is a
+     * deliberate design as we don't want to keep a DB transaction open while waiting for LLM calls.
      */
     @Transactional(Transactional.TxType.REQUIRES_NEW)
     CarInfo findCarInfo(Integer carNumber) {
@@ -103,6 +115,8 @@ public class CarManagementService {
     /**
      * Update car info in a separate transaction after workflow completes.
      * Uses merge to handle detached entity from the workflow.
+     * Needs its own transaction because it needs a new persistence context in which the detached
+     * entity can be merged. The second transaction is therefore independent of the first one.
      */
     @Transactional(Transactional.TxType.REQUIRES_NEW)
     void updateCarInfo(CarInfo carInfo) {
