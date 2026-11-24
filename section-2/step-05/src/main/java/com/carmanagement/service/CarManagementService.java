@@ -45,6 +45,8 @@ public class CarManagementService {
      * 5. Approval arrives; workflow finishes. The Uni emits its result, allowing Quarkus to send the response to the client.
      * Note that the HTTP request is kept open until an approval arrives. Only then the Uni can
      * produce a result, and a HTTP response is sent back to the client.
+     * section-3/step-04 returns to the human in the loop pattern but with a different approach.
+     * There, the workflow can pause without keeping an HTTP request or worker thread open/occupied.
      */
     public Uni<String> processCarReturn(Integer carNumber, String feedback) {
 

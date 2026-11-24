@@ -43,6 +43,10 @@ public class TripApprovalResource {
         if (!"approved".equals(approval.status()) && !"rejected".equals(approval.status())) {
             return Response.status(400).entity(new TripError("invalid_decision", "status must be approved or rejected.")).build();
         }
+
+        // Send the decision to the shared memory (between the application and the flow).
+        // instanceId is sent directly to the flow through kafka as part of the cloud event.
+        // See withExtension below.
         TripPlanStatus submitted = store.submitDecision(approval);
 
         OutgoingCloudEventMetadata<TripApproval> metadata = OutgoingCloudEventMetadata.<TripApproval>builder()

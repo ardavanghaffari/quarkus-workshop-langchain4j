@@ -6,6 +6,50 @@ The trip planner can now generate recommendations and check them before returnin
 
 By the end of the exercise, the customer can refresh the browser, return to the same pending trip with its original request details, and approve or reject it.
 
+We first saw the human in the loop pattern in section-2/step-05 where the HTTP connection was kept
+open until approval/rejection arrived via a second request. The important implementation detail
+there was:
+
+```java
+approvalService.createProposalAndWaitForDecision()
+    .get(5,TimeUnit.MINUTES);
+```
+
+The `.get()` blocks the workflow thread until the `CompletableFuture` completes, or the five-minute
+timeout expires.
+
+Here we have an event-driven approach to human in the loop pattern which is more decoupled. Instead
+of keeping the original HTTP request open during the decision, this step uses Quarkus Flow + Kafka.
+The important distinction is that the workflow is now independent of the HTTP request that started
+it. With Quarkus Flow, the workflow instead has an explicit waiting stage:
+
+```java
+.emitJson(...)  // Publish the plan
+.listen(...)    // Wait for the decision event
+```
+
+When execution reaches `listen()`, the workflow suspends. It doesn't need to keep a Java thread
+blocked while waiting. When the matching event arrives, Flow continues execution from that waiting
+stage.
+
+```text
+Here is the high level view:
+
+1. Browser → POST /trip/plan. Customer submits trip details. Returns before human decision arrives.
+2. Planning API → Kafka (flow-in). Publishes a trip-requested event.
+3. Quarkus Flow. Starts a workflow, invokes the trip-planning agents and generates an itinerary.
+4. Flow → Kafka (flow-out). Publishes the generated plan as an approval-requested event.
+5. Planning API → Browser. Returns the plan and workflow identifiers. The HTTP request ends.
+
+Human decision, potentially much later:
+
+1. Browser → PUT /trip/approve. Customer approves or rejects the itinerary.
+2. Approval API → Kafka (flow-in). Publishes the decision event with the relevant workflow ID.
+3. Quarkus Flow. Finds the workflow waiting for that decision and resumes it.
+4. Flow → Kafka (flow-out). Publishes the final outcome: confirmed, rejected or failed.
+5. Browser. Polls the status endpoint to retrieve the final outcome.
+```
+
 ## Keeping track of in-flight workflows
 
 When a customer creates a trip, the workflow runs the same planning pipeline as before, but this time it publishes the plan as a **CloudEvent onto a Kafka topic**, and then waits for the customer to make up their mind. It might be a minute or it might be after lunch. When the decision comes in, it picks up the workflow from where it left off (making sure to continue the right customer's workflow) and finalizes the trip and returns the confirmation to the customer.
@@ -23,7 +67,76 @@ flowchart TD
     booking -->|Failure| failed
 ```
 
-A CloudEvent carries the trip details as its `data` and uses attributes such as `type`, `source`, and `id` to identify the event. Kafka transports these events between the application and Flow.
+A CloudEvent carries the trip details as its `data` and uses attributes such as `type`, `source`, and `id` to identify the event. 
+Kafka transports these events between the application and Flow. Note that the Flow is part of the 
+Quarkus application running in the same process. Kafka is the broker running in a separate process.
+It carries events from REST API to the Flow both running in the same process. Kafka is primarily 
+associated with distributed event-driven systems. The workshop here is using it for communication 
+between components inside a single application which may seem unnecessarily complicated.
+
+The key is that Kafka isn't being used because the REST API and Quarkus Flow run in separate
+processes. It's being used because the workshop demonstrates an event-driven architecture, where the
+workflow is triggered and resumed through events rather than direct method calls.
+
+There are some practical advantages to this design, even when everything currently runs in one
+process. Why use Kafka if Flow is in the same process? Because the communication boundary is
+logical, not necessarily a process boundary. The workshop connects Quarkus Flow to Quarkus Reactive
+Messaging. Flow publishes and consumes events through messaging channels:
+
+- flow-out: events emitted by the workflow.
+- flow-in: events received by the workflow, including decisions that resume suspended instances.
+
+Kafka acts as the broker behind those channels. This gives the application some useful properties:
+
+- Loose coupling: The REST endpoint doesn't need to know how Flow internally manages workflow
+  instances.
+- Asynchronous communication: Publishing an event doesn't require the receiver to process it
+  immediately.
+- Buffering: Events can wait in Kafka while consumers are busy or temporarily unavailable.
+- Scalability: You can later run multiple application instances, with workflows and event consumers
+  distributed across them.
+- Consistent architecture: The same event-driven design works in local development and in a
+  distributed production deployment.
+
+An alternative to Kafka would be:
+
+1. In-memory messaging: This is probably the closest alternative to Kafka for the workshop. Quarkus
+   Reactive Messaging supports an in-memory connector. You can connect the flow-in and flow-out
+   channels without running a Kafka broker. In fact, the workshop's test configuration uses it:
+   ```
+    mp.messaging.outgoing.flow-out.connector=smallrye-in-memory
+    mp.messaging.incoming.flow-out-consumer.connector=smallrye-in-memory
+   ```
+   This allows the application to exchange messages through the same messaging abstraction, but
+   entirely in memory.
+2. Direct CDI communication: You could avoid messaging altogether. For example, the REST endpoint
+   could invoke a service that starts the workflow directly. The workflow could then suspend while
+   waiting for approval. The approval endpoint could call another method on the workflow service to
+   deliver the decision.
+3. Database-backed messaging. You could use PostgreSQL as a durable queue:
+    - REST endpoint stores a trip request in a database.
+    - A background component picks up pending requests and starts workflows.
+    - The workflow stores its pending approval state.
+    - The approval endpoint stores the human decision.
+    - A background component delivers the decision to the waiting workflow.
+4. Quarkus CDI Events. Keeps the architecture event-driven without Kafka, using an in-process event
+   bus or messaging implementation. Quarkus supports the standard CDI event mechanism. You publish
+   events using `Event<T>` and consume them using observer methods.
+   ```java
+    // Publishing an event:
+    @Inject
+    Event<TripRequestedEvent> tripEvents;
+
+    public void requestTrip(TripRequest request) {
+        tripEvents.fire(new TripRequestedEvent(request));
+    }
+    
+    // Consuming the event:
+    void onTripRequested(
+    @Observes TripRequestedEvent event) {
+        tripWorkflow.start(event.request());
+    }
+   ```
 
 ## Starting from the Step 04 project
 
@@ -62,6 +175,21 @@ To enable Quarkus Flow, its messaging and LangChain4j integrations and the Kafka
 --8<-- "../../section-3/step-04/pom.xml:73:88"
 ```
 
+```text
+quarkus-flow
+    |
+    +-- quarkus-flow-messaging
+    |       |
+    |       +-- quarkus-messaging-kafka
+    |
+    +-- quarkus-flow-langchain4j
+
+quarkus-flow: Workflow engine. Provides workflow definition and execution, including pausing, resuming and managing workflow state.
+quarkus-flow-messaging: Messaging integration for Flow. Connects workflow execution to Reactive Messaging channels, allowing workflows to receive and emit events.
+quarkus-messaging-kafka: Kafka connector. Connects Quarkus Reactive Messaging channels to Kafka topics for sending and receiving messages.
+quarkus-flow-langchain4j: LangChain4j integration. Allows Quarkus Flow workflows to invoke LangChain4j AI services and agents.
+```
+
 Next, we need to add a few configuration items to the application.properties file to configure Quarkus flow to use Kafka, and to know which topics to send and receive Flow messages from. We also need to configure the appropriate message serializers.
 
 ```properties title="application.properties (Flow and messaging)"
@@ -69,6 +197,62 @@ Next, we need to add a few configuration items to the application.properties fil
 ```
 
 The application sends requests and decisions through `flow-in-producer` to the `flow-in` topic, where Flow reads them. Plans and final outcomes travel back through `flow-out` to the application's `flow-out-consumer`, which records them for the browser.
+
+There are 2 Kafka topics:
+
+1. flow-in – carries events from the application to Quarkus Flow.
+2. flow-out – carries events from Quarkus Flow back to the application.
+
+The four messaging channels are just producers and consumers connected to those two topics:
+
+| Channel | Direction | Topic | Role |
+| :--- | :--- | :--- | :--- |
+| `flow-in` | Incoming | `flow-in` | Flow consumes requests and decisions |
+| `flow-in-producer` | Outgoing | `flow-in` | Application publishes requests and decisions |
+| `flow-out` | Outgoing | `flow-out` | Flow publishes plans and outcomes |
+| `flow-out-consumer` | Incoming | `flow-out` | Application consumes plans and outcomes |
+
+```mermaid
+flowchart LR
+subgraph QA [Quarkus Application]
+direction LR
+A1(flow-out-consumer<br/>Incoming) --> A2(TripPlanStore)
+A2 --> A3(REST API)
+A3 --> A4(flow-in-producer<br/>Outgoing)
+end
+
+    subgraph K [Kafka]
+        direction TB
+        K1[(flow-out)]
+        K2[(flow-in)]
+    end
+
+    subgraph QF [Quarkus Flow]
+        direction LR
+        B1(flow-in<br/>Incoming) --> B2(Workflow Engine)
+        B2 --> B3(flow-out<br/>Outgoing)
+    end
+
+    A4 -->|Publish| K2
+    K2 -->|Consume| B1
+    B3 -->|Publish| K1
+    K1 -->|Consume| A1
+
+    %% Styling to match the image
+    classDef blueNode fill:#d8e4ff,stroke:#3b71ca,stroke-width:1px,color:#000,rx:10,ry:10;
+    classDef greenNode fill:#d4f7e2,stroke:#1ea362,stroke-width:1px,color:#000,rx:10,ry:10;
+    classDef yellowNode fill:#fef3d1,stroke:#d98a1c,stroke-width:1px,color:#000;
+    classDef container fill:#f2f2f2,stroke:#d9d9d9,stroke-width:1px,color:#333;
+
+    class A1,A2,A3,A4 blueNode;
+    class B1,B2,B3 greenNode;
+    class K1,K2 yellowNode;
+    class QA,K,QF container;
+```
+
+The channels come from MicroProfile Reactive Messaging, implemented by SmallRye Reactive Messaging 
+in Quarkus. `quarkus-messaging-kafka` provides the Kafka connector (smallrye-kafka). 
+`quarkus-flow-messaging` integrates Quarkus Flow with Reactive Messaging.
 
 ## Sending the trip request as an event
 

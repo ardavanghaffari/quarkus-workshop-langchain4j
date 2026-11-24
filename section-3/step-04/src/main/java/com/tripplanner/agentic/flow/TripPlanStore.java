@@ -27,6 +27,68 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.WebApplicationException;
 import jakarta.ws.rs.core.Response;
 
+/*
+ * TripPlanStore is an application-level, in-memory store for tracking trip-planning
+ * requests and their outcomes. It is NOT the workflow engine's state store.
+ *
+ * There are two separate types of state in this application:
+ *
+ * 1. Workflow execution state, managed internally by Quarkus Flow. This includes
+ *    workflow instance IDs, execution progress, context and paused workflows.
+ * 2. Application-level trip state, managed by this class. This includes the original
+ *    trip request, generated plan, approval decisions and current trip status.
+ *
+ * In Step 04, both are in-memory. Quarkus Flow uses its default in-memory state
+ * management because no persistence extension is configured. This class maintains
+ * its own state using the following fields:
+ *
+ * - requests: maps a request ID to its latest TripPlanStatus.
+ * - instances: maps a workflow instance ID to its corresponding request ID.
+ * - decisions: stores approval/rejection decisions submitted for pending workflows.
+ * - latestRequestId: identifies the most recently registered trip.
+ *
+ * The store is shared by several application components:
+ *
+ * - TripPlannerResource registers new trips, waits for planning results and retrieves
+ *   trip statuses for HTTP requests.
+ * - TripApprovalResource records customer approval/rejection decisions before
+ *   publishing them to Kafka.
+ * - TripPlannerFlow binds request IDs to workflow instance IDs, retrieves trip
+ *   information and validates decisions before resuming workflows.
+ * - The Kafka consumer (flow-out-consumer) receives workflow outcome events,
+ *   updates the corresponding trip status and wakes up HTTP request threads
+ *   waiting for the result.
+ * - The workflow execution listener handles workflow failures that may occur
+ *   without a normal outcome event.
+ *
+ * Thread safety:
+ *
+ * This class is @ApplicationScoped, meaning its state is shared across concurrent
+ * HTTP request threads, workflow execution threads, and Kafka consumer threads.
+ * Since the underlying HashMaps are not thread-safe, synchronized methods protect
+ * concurrent access and ensure that related updates across multiple maps and fields
+ * remain consistent and visible to other threads.
+ *
+ * awaitPlan() uses timedWait() to suspend an HTTP request thread while waiting for
+ * the trip to move beyond the initial "planning" state. Waiting releases the object's
+ * monitor, allowing other threads to update the store.
+ *
+ * After updating a trip's status (e.g. when a workflow outcome is received or a
+ * submission/workflow failure occurs), the store calls notifyAll() to wake up all
+ * threads waiting on the same monitor. Each awakened thread reacquires the monitor
+ * and checks whether its own request has reached the expected state. notifyAll()
+ * is used instead of notify() because multiple requests may be waiting concurrently,
+ * and notify() could wake a thread waiting for a different trip.
+ *
+ * This implementation is not durable: restarting the application loses both the
+ * application-level trip data and the in-memory workflow execution state.
+ *
+ * Step 05 introduces database persistence for both independently:
+ * - Quarkus Flow uses its JPA persistence extension to persist workflow execution state.
+ * - TripPlanStore uses Hibernate ORM to persist application-level trip data.
+ *
+ * In Step 05, awaitPlan() uses database polling instead of wait()/notifyAll().
+ */
 @ApplicationScoped
 public class TripPlanStore implements WorkflowExecutionListener {
     private static final Logger LOG = Logger.getLogger(TripPlanStore.class);
@@ -125,6 +187,31 @@ public class TripPlanStore implements WorkflowExecutionListener {
         notifyAll();
     }
 
+    /*
+     * Handles terminal workflow failures as a fallback to the normal outcome-publishing mechanism.
+     *
+     * There are two failure scenarios:
+     *
+     * 1. Business-level failure (normal handling):
+     *    A task such as plan() or resolveDecision() catches an exception and returns a
+     *    TripPlanStatus with status "failed". The workflow continues and routes this result
+     *    to publishFailure, which uses emitJson() to publish a com.tripplanner.trip.failed
+     *    event to Kafka. The flow-out-consumer receives the event and updates TripPlanStore.
+     *
+     * 2. Terminal workflow failure (fallback handling):
+     *    The workflow engine itself fails before it can successfully publish its outcome.
+     *    For example, publishing the com.tripplanner.trip.failed event from publishFailure
+     *    (or another outcome such as publishConfirmation) may fail. In this case, the normal
+     *    Kafka-based notification might never reach the application. Flow notifies the
+     *    WorkflowExecutionListener through onWorkflowFailed(), allowing the store to record
+     *    the failure directly.
+     *
+     * In both cases, the request is marked as failed. Any plan already generated and
+     * reviewed by the customer is preserved rather than discarded. The first scenario
+     * is a failure of the trip-planning or booking operation, while the second is a
+     * failure of the workflow execution itself. The latter is why WorkflowExecutionListener
+     * is needed.
+     */
     @Override
     public synchronized void onWorkflowFailed(WorkflowFailedEvent event) {
         // Publishing the domain outcome can itself fail. Only a terminal engine failure takes this fallback path.
